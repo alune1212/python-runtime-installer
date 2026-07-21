@@ -98,7 +98,8 @@ Describe 'Logging retention' {
             Set-Content -LiteralPath $path -Value $_
             (Get-Item $path).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes($_)
         }
-        Initialize-InstallerLog -LogDirectory $logRoot | Out-Null
+        $currentLog = Initialize-InstallerLog -LogDirectory $logRoot
+        Test-Path -LiteralPath $currentLog | Should -BeTrue
         @(Get-ChildItem -LiteralPath $logRoot -Filter 'installer-*.log').Count | Should -Be 20
     }
 }

@@ -82,9 +82,13 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "/FORCEBUNDLED",
         "healthyManifestHash",
         "custom_drift-1.0.dist-info",
-        "runtime_ownership -ne 'reused'",
+        "runtime_ownership -eq 'reused'",
         "Reused CPython was removed by uninstall",
-        "Retained installer logs were not preserved",
+        "failed_staging",
+        "installer-e2e-evidence.json",
+        "Test-PathsUnchanged",
+        "verification_checks",
+        "private_python_removed",
     ):
         assert required in test_script
 

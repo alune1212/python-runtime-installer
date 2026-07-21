@@ -24,10 +24,10 @@ $previousManifestPath = $null
 $operation = 'install'
 $discoverySnapshot = $null
 
-function Write-InstallStatus([string]$Value) {
-    if (-not [string]::IsNullOrWhiteSpace($StatusPath)) {
+function Write-InstallStatus([string]$Value, [string]$Path) {
+    if (-not [string]::IsNullOrWhiteSpace($Path)) {
         try {
-            [System.IO.File]::WriteAllText($StatusPath, $Value, (New-Object System.Text.UTF8Encoding($false)))
+            [System.IO.File]::WriteAllText($Path, $Value, (New-Object System.Text.UTF8Encoding($false)))
         } catch {
             [Console]::Error.WriteLine("Could not write UI status: {0}" -f $_.Exception.Message)
         }
@@ -56,7 +56,7 @@ try {
         $versionComparison = Compare-InstallerVersion -InstalledVersion ([string]$installedManifest.installer_version) -IncomingVersion $incomingVersion
         if ($versionComparison -gt 0) {
             Write-InstallerLog -Stage 'lifecycle' -Level 'ERROR' -Message ("Downgrade blocked: installed={0} incoming={1}. Uninstall first." -f $installedManifest.installer_version, $incomingVersion)
-            Write-InstallStatus -Value 'downgrade-blocked'
+            Write-InstallStatus -Value 'downgrade-blocked' -Path $StatusPath
             exit 21
         }
         if ($versionComparison -eq 0 -and (Test-Path -LiteralPath $activePython -PathType Leaf)) {
@@ -71,7 +71,7 @@ try {
                 ) -Stage 'repair-check' | Out-Null
                 Publish-DiscoveryMetadata -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
                 Write-InstallerLog -Stage 'complete' -Message 'Existing environment is healthy; no rebuild required.'
-                Write-InstallStatus -Value 'healthy'
+                Write-InstallStatus -Value 'healthy' -Path $StatusPath
                 exit 0
             } catch {
                 $operation = 'repair'
@@ -189,6 +189,7 @@ try {
         payload_files = $payloadManifest.files
         packages = $verification.packages
         bootstrap_tooling = $verification.bootstrap_tooling
+        verification_checks = $verification.checks
         verified_at = $verification.verified_at
         verification_status = 'passed'
     }
@@ -223,16 +224,16 @@ try {
         $previousManifestPath = $null
     }
     Write-InstallerLog -Stage 'complete' -Message ("Installation completed: {0}" -f $activePython)
-    Write-InstallStatus -Value $operation
+    Write-InstallStatus -Value $operation -Path $StatusPath
     exit 0
 } catch {
     if ($activationCommitted) {
         [Console]::Error.WriteLine("Post-commit housekeeping warning: {0}" -f $_.Exception.Message)
-        Write-InstallStatus -Value $operation
+        Write-InstallStatus -Value $operation -Path $StatusPath
         exit 0
     }
     Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message $_.Exception.ToString()
-    Write-InstallStatus -Value 'failed'
+    Write-InstallStatus -Value 'failed' -Path $StatusPath
     try {
         if ($activationAttempted -and (Test-Path -LiteralPath (Join-Path $AppRoot 'venv'))) {
             Remove-OwnedDirectory -AppRoot $AppRoot -Path (Join-Path $AppRoot 'venv')

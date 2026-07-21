@@ -16,10 +16,11 @@ function Initialize-InstallerLog {
     $script:InstallerLogPath = Join-Path $LogDirectory ("installer-{0}-{1}.log" -f $Operation, $timestamp)
     [System.IO.File]::WriteAllText($script:InstallerLogPath, '', $script:Utf8NoBom)
 
-    $logs = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'installer-*.log' -File |
+    $historicalLogs = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'installer-*.log' -File |
+        Where-Object FullName -NE $script:InstallerLogPath |
         Sort-Object LastWriteTimeUtc -Descending)
-    if ($logs.Count -gt 20) {
-        $logs | Select-Object -Skip 20 | Remove-Item -Force -ErrorAction SilentlyContinue
+    if ($historicalLogs.Count -gt 19) {
+        $historicalLogs | Select-Object -Skip 19 | Remove-Item -Force -ErrorAction SilentlyContinue
     }
     Write-InstallerLog -Stage 'logging' -Message ("Log initialized: {0}" -f $script:InstallerLogPath)
     return $script:InstallerLogPath
