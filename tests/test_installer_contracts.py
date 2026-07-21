@@ -61,6 +61,12 @@ def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> Non
     assert "{userdesktop}" not in project
 
 
+def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
+    script = read("scripts/build/Install-InnoSetup.ps1")
+    for required in ("/CURRENTUSER", "/PORTABLE=1", "/NOICONS"):
+        assert required in script
+
+
 def test_lifecycle_script_contains_rollback_and_ownership_guards() -> None:
     install = read("scripts/windows/Install-Runtime.ps1")
     uninstall = read("scripts/windows/Uninstall-Runtime.ps1")

@@ -20,7 +20,16 @@ $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subj
 if ($signature.Status -ne 'Valid' -or -not $subject.Contains([string]$config.build.inno_setup.expected_publisher)) {
     throw "Inno Setup signature verification failed: status=$($signature.Status) subject=$subject"
 }
-$process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ("/DIR={0}" -f $innoRoot)) -Wait -PassThru
+$process = Start-Process -FilePath $installer -ArgumentList @(
+    '/VERYSILENT',
+    '/SUPPRESSMSGBOXES',
+    '/NORESTART',
+    '/SP-',
+    '/CURRENTUSER',
+    '/PORTABLE=1',
+    '/NOICONS',
+    ("/DIR={0}" -f $innoRoot)
+) -Wait -PassThru
 if ($process.ExitCode -ne 0) {
     throw "Inno Setup tool installation failed with exit code $($process.ExitCode)"
 }
