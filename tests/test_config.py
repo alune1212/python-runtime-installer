@@ -35,6 +35,7 @@ def test_committed_configuration_and_direct_requirements_are_valid(
         (("target", "python", "sha256"), "bad", "Python sha256"),
         (("target", "python", "version"), "3.12.10", "exact 3.13"),
         (("product", "app_id"), "not-a-guid", "uppercase bare GUID"),
+        (("build", "inno_setup", "chinese_translation", "sha256"), "bad", "translation sha256"),
     ],
 )
 def test_invalid_configuration_is_rejected(

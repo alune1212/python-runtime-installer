@@ -19,6 +19,8 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
     config = json.loads((ROOT / "config" / "product.json").read_text(encoding="utf-8"))
     version = config["product"]["version"]
     python_version = config["target"]["python"]["version"]
+    inno = config["build"]["inno_setup"]
+    translation = inno["chinese_translation"]
     components: list[dict[str, object]] = [
         {
             "type": "application",
@@ -33,6 +35,29 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
             "name": "CPython",
             "version": python_version,
             "purl": "pkg:generic/cpython@" + python_version,
+        },
+        {
+            "type": "framework",
+            "bom-ref": f"pkg:github/jrsoftware/issrc@{inno['version']}",
+            "name": "Inno Setup",
+            "version": inno["version"],
+            "purl": f"pkg:github/jrsoftware/issrc@{inno['version']}",
+            "hashes": [{"alg": "SHA-256", "content": inno["sha256"]}],
+        },
+        {
+            "type": "data",
+            "bom-ref": (
+                "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
+                + translation["commit"]
+            ),
+            "name": "Inno Setup Chinese Simplified Translation",
+            "version": translation["version"],
+            "purl": (
+                "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
+                + translation["commit"]
+            ),
+            "hashes": [{"alg": "SHA-256", "content": translation["sha256"]}],
+            "properties": [{"name": "source:git-commit", "value": translation["commit"]}],
         },
     ]
     for item in sorted(read_lock(lock_path), key=lambda value: value.canonical_name):

@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--installer", type=Path, required=True)
     args = parser.parse_args(argv)
     config = json.loads((ROOT / "config" / "product.json").read_text(encoding="utf-8"))
+    inno = config["build"]["inno_setup"]
+    translation = inno["chinese_translation"]
     required = [
         args.installer,
         args.release_dir / "SHA256SUMS.txt",
@@ -52,8 +54,28 @@ def main(argv: list[str] | None = None) -> int:
         args.release_dir
         / f"{config['product']['output_basename']}-{config['product']['version']}-evidence.zip",
         args.release_dir / "sources" / "source-evidence.json",
+        args.release_dir / "licenses" / "inno-setup" / "LICENSE.txt",
+        args.release_dir / "licenses" / "inno-setup-chinese-translation" / "LICENSE.txt",
+        args.release_dir
+        / "sources"
+        / "inno-setup-chinese-translation"
+        / str(translation["filename"]),
     ]
     errors = [f"missing release artifact: {path}" for path in required if not path.is_file()]
+    evidence_hashes = {
+        args.release_dir / "licenses" / "inno-setup" / "LICENSE.txt": inno["license_sha256"],
+        args.release_dir
+        / "licenses"
+        / "inno-setup-chinese-translation"
+        / "LICENSE.txt": translation["license_sha256"],
+        args.release_dir
+        / "sources"
+        / "inno-setup-chinese-translation"
+        / str(translation["filename"]): translation["sha256"],
+    }
+    for path, expected_hash in evidence_hashes.items():
+        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+            errors.append(f"{path.name}: evidence hash does not match pinned configuration")
     secret_values = [
         os.environ[name].encode()
         for name in (
@@ -92,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             for lock in (ROOT / "requirements.txt", ROOT / "bootstrap-requirements.txt")
             for item in read_lock(lock)
         }
+        expected_components.add(("Inno Setup", str(inno["version"])))
+        expected_components.add(
+            ("Inno Setup Chinese Simplified Translation", str(translation["version"]))
+        )
         expected_components.add(("CPython", config["target"]["python"]["version"]))
         missing = sorted(expected_components - components)
         if missing:
@@ -105,6 +131,12 @@ def main(argv: list[str] | None = None) -> int:
             errors.append("build provenance commit does not match the workflow commit")
         if expected_run and provenance.get("github_run_id") != expected_run:
             errors.append("build provenance run does not match the workflow run")
+        if provenance.get("inno_setup_sha256") != inno["sha256"]:
+            errors.append("build provenance Inno Setup hash does not match configuration")
+        if provenance.get("inno_setup_translation_commit") != translation["commit"]:
+            errors.append("build provenance translation commit does not match configuration")
+        if provenance.get("inno_setup_translation_sha256") != translation["sha256"]:
+            errors.append("build provenance translation hash does not match configuration")
     payload_manifest_path = args.release_dir / "payload-manifest.json"
     if payload_manifest_path.is_file():
         payload_manifest = json.loads(payload_manifest_path.read_text(encoding="utf-8"))

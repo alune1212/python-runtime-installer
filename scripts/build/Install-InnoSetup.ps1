@@ -37,4 +37,13 @@ $compiler = Join-Path $innoRoot 'ISCC.exe'
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw "Inno Setup compiler not found: $compiler"
 }
+$translation = $config.build.inno_setup.chinese_translation
+$translationDirectory = Join-Path $innoRoot 'Languages'
+[System.IO.Directory]::CreateDirectory($translationDirectory) | Out-Null
+$translationPath = Join-Path $translationDirectory ([string]$translation.filename)
+Invoke-WebRequest -Uri ([string]$translation.url) -OutFile $translationPath -UseBasicParsing
+$translationHash = (Get-FileHash -LiteralPath $translationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($translationHash -ne [string]$translation.sha256) {
+    throw "Inno Setup translation hash mismatch: expected=$($translation.sha256) actual=$translationHash"
+}
 Write-Output $compiler

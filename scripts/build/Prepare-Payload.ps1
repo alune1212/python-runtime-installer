@@ -64,6 +64,42 @@ if ($LASTEXITCODE -ne 0) { throw 'Third-party notice generation failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'SBOM generation failed.' }
 & uv run python -m scripts.build.download_source_evidence
 if ($LASTEXITCODE -ne 0) { throw 'Source evidence generation failed.' }
+$innoConfig = $config.build.inno_setup
+$translationConfig = $innoConfig.chinese_translation
+$innoLicenseDirectory = Join-Path $releaseRoot 'licenses\inno-setup'
+$translationLicenseDirectory = Join-Path $releaseRoot 'licenses\inno-setup-chinese-translation'
+$translationSourceDirectory = Join-Path $releaseRoot 'sources\inno-setup-chinese-translation'
+foreach ($directory in @($innoLicenseDirectory, $translationLicenseDirectory, $translationSourceDirectory)) {
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+}
+$innoLicensePath = Join-Path $innoLicenseDirectory 'LICENSE.txt'
+Get-VerifiedDownload -Uri ([string]$innoConfig.license_url) -Destination $innoLicensePath -ExpectedSha256 ([string]$innoConfig.license_sha256)
+$translationLicensePath = Join-Path $translationLicenseDirectory 'LICENSE.txt'
+Get-VerifiedDownload -Uri ([string]$translationConfig.license_url) -Destination $translationLicensePath -ExpectedSha256 ([string]$translationConfig.license_sha256)
+$translationSourcePath = Join-Path $translationSourceDirectory ([string]$translationConfig.filename)
+Get-VerifiedDownload -Uri ([string]$translationConfig.url) -Destination $translationSourcePath -ExpectedSha256 ([string]$translationConfig.sha256)
+
+$noticeLines = @(
+    '',
+    'Build and installer components',
+    '',
+    'Name: Inno Setup',
+    ("Version: {0}" -f $innoConfig.version),
+    'License: Inno Setup License',
+    ("Source: {0}" -f $innoConfig.url),
+    'License file: licenses/inno-setup/LICENSE.txt',
+    '',
+    'Name: Inno Setup Chinese Simplified Translation',
+    ("Version: {0} (commit {1})" -f $translationConfig.version, $translationConfig.commit),
+    'License: MIT',
+    ("Source: {0}" -f $translationConfig.url),
+    'License file: licenses/inno-setup-chinese-translation/LICENSE.txt',
+    'Source file: sources/inno-setup-chinese-translation/ChineseSimplified.isl',
+    ''
+)
+$noticePath = Join-Path $releaseRoot 'THIRD_PARTY_NOTICES.txt'
+$noticeText = $noticeLines -join [Environment]::NewLine
+[System.IO.File]::AppendAllText($noticePath, $noticeText, (New-Object System.Text.UTF8Encoding($false)))
 & uv run python -m scripts.build.write_provenance
 if ($LASTEXITCODE -ne 0) { throw 'Provenance generation failed.' }
 

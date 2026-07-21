@@ -63,7 +63,13 @@ def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> Non
 
 def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
     script = read("scripts/build/Install-InnoSetup.ps1")
-    for required in ("/CURRENTUSER", "/PORTABLE=1", "/NOICONS"):
+    for required in (
+        "/CURRENTUSER",
+        "/PORTABLE=1",
+        "/NOICONS",
+        "chinese_translation",
+        "translation hash mismatch",
+    ):
         assert required in script
 
 

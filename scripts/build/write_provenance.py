@@ -28,6 +28,16 @@ def main(argv: list[str] | None = None) -> int:
         "target": "cp313-win_amd64",
         "uv_version": config["build"]["uv_version"],
         "inno_setup_version": config["build"]["inno_setup"]["version"],
+        "inno_setup_sha256": config["build"]["inno_setup"]["sha256"],
+        "inno_setup_translation_version": config["build"]["inno_setup"]["chinese_translation"][
+            "version"
+        ],
+        "inno_setup_translation_commit": config["build"]["inno_setup"]["chinese_translation"][
+            "commit"
+        ],
+        "inno_setup_translation_sha256": config["build"]["inno_setup"]["chinese_translation"][
+            "sha256"
+        ],
         "git_commit": os.environ.get("GITHUB_SHA", "local"),
         "github_repository": os.environ.get(
             "GITHUB_REPOSITORY", "alune1212/python-runtime-installer"

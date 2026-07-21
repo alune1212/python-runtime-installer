@@ -2,7 +2,7 @@
 
 ## 发布门禁
 
-Windows 完整构建必须依次通过：配置/标签一致性、UV 冻结同步、格式与静态检查、Python/Pester 测试、PowerShell 5.1 分析、锁一致性、漏洞例外有效期、依赖审计、CPython 与 Inno Setup 哈希/发布者验证、二进制 wheel-only 构建、许可证与源码证据、CycloneDX SBOM、真实 EXE 安装/修复/卸载测试、secret scan 和 release evidence 一致性。
+Windows 完整构建必须依次通过：配置/标签一致性、UV 冻结同步、格式与静态检查、Python/Pester 测试、PowerShell 5.1 分析、锁一致性、漏洞例外有效期、依赖审计、CPython 与 Inno Setup 哈希/发布者验证、固定提交的简体中文翻译及许可证哈希验证、二进制 wheel-only 构建、许可证与源码证据、CycloneDX SBOM、真实 EXE 安装/修复/卸载测试、secret scan 和 release evidence 一致性。
 
 手动 dispatch 只上传 Actions artifact。只有 `vX.Y.Z` tag 与 `config/product.json` 一致且全部门禁成功时才创建 GitHub Release；`0.1.0` 属于 prerelease。普通 push、PR 和月度刷新绝不发布、打 tag 或自动合并。
 
@@ -22,7 +22,7 @@ Windows 完整构建必须依次通过：配置/标签一致性、UV 冻结同�
 
 ## 发布证据和校验
 
-Release 顶层提供 EXE、`SHA256SUMS.txt`、CycloneDX JSON SBOM、第三方 notices、build provenance、payload manifest 和 evidence ZIP。ZIP 内含项目/Python/依赖许可证材料、配置要求的源码证据、SBOM 与 provenance。
+Release 顶层提供 EXE、`SHA256SUMS.txt`、CycloneDX JSON SBOM、第三方 notices、build provenance、payload manifest 和 evidence ZIP。ZIP 内含项目、Python、依赖、Inno Setup 及简体中文翻译的许可证材料，翻译原始 `.isl`、配置要求的依赖源码证据、SBOM 与 provenance。
 
 PowerShell 校验示例：
 
@@ -35,7 +35,7 @@ Get-AuthenticodeSignature .\python-runtime-installer-0.1.0-windows-x64.exe | For
 
 ## 第三方再分发
 
-复制安装器时必须同时保留校验和及 evidence。依赖许可证义务来自精确 wheel 集合；MySQL Connector/Python 等配置项还会保留官方 sdist 与其 PyPI SHA-256 作为源码证据。再分发方仍需自行确认其使用和分发方式符合各许可证，不得删除 notice、许可证或应提供的源码材料。
+复制安装器时必须同时保留校验和及 evidence。依赖许可证义务来自精确 wheel 集合；Inno Setup 与固定提交的简体中文翻译分别保留许可证，翻译源文件也随 evidence 提供；MySQL Connector/Python 等配置项还会保留官方 sdist 与其 PyPI SHA-256 作为源码证据。再分发方仍需自行确认其使用和分发方式符合各许可证，不得删除 notice、许可证或应提供的源码材料。
 
 ## GitHub 权限
 

@@ -158,6 +158,45 @@ def validate_product_config(config: dict[str, object], tag: str | None = None) -
         str(inno.get("url", "")).endswith(str(inno.get("filename", ""))),
         "Inno Setup URL does not end with configured filename",
     )
+    _require(
+        SHA256_RE.fullmatch(str(inno.get("license_sha256", ""))) is not None,
+        "Inno Setup license_sha256 must be 64 lowercase hexadecimal characters",
+    )
+    inno_license_url = str(inno.get("license_url", ""))
+    _require(urlparse(inno_license_url).scheme == "https", "Inno Setup license URL must use HTTPS")
+    expected_inno_tag = "is-" + str(inno.get("version", "")).replace(".", "_")
+    _require(
+        f"/{expected_inno_tag}/" in inno_license_url, "Inno Setup license URL is not version pinned"
+    )
+
+    translation = inno.get("chinese_translation")
+    _require(isinstance(translation, dict), "Inno Setup chinese_translation must be an object")
+    assert isinstance(translation, dict)
+    translation_commit = str(translation.get("commit", ""))
+    _require(
+        re.fullmatch(r"[0-9a-f]{40}", translation_commit) is not None,
+        "Inno Setup translation commit must be a full lowercase Git SHA",
+    )
+    _require(translation.get("version") == "6.5.0+", "unexpected Inno Setup translation version")
+    for field in ("sha256", "license_sha256"):
+        _require(
+            SHA256_RE.fullmatch(str(translation.get(field, ""))) is not None,
+            f"Inno Setup translation {field} must be 64 lowercase hexadecimal characters",
+        )
+    translation_url = str(translation.get("url", ""))
+    translation_license_url = str(translation.get("license_url", ""))
+    for label, value in (("file", translation_url), ("license", translation_license_url)):
+        _require(
+            urlparse(value).scheme == "https", f"Inno Setup translation {label} URL must use HTTPS"
+        )
+        _require(
+            f"/{translation_commit}/" in value,
+            f"Inno Setup translation {label} URL is not commit pinned",
+        )
+    _require(
+        translation_url.endswith(str(translation.get("filename", ""))),
+        "Inno Setup translation URL does not end with configured filename",
+    )
     _require(build.get("uv_version") == "0.11.29", "build.uv_version must stay pinned")
     _require(
         project["tool"]["uv"]["required-version"] == f"=={build['uv_version']}",

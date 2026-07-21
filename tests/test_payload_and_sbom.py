@@ -37,6 +37,8 @@ def test_sbom_contains_python_runtime_bootstrap_and_all_locked_packages() -> Non
     names = [component["name"] for component in components]
     assert names[0] == "CPython"
     assert "pandas" in names
+    assert "Inno Setup" in names
+    assert "Inno Setup Chinese Simplified Translation" in names
     assert "mysql-connector-python" in names
     assert names.count("pip") == 1
     assert sbom["bomFormat"] == "CycloneDX"
