@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "windows_10_x64": {
+    "passed": false,
+    "tested_on": null,
+    "evidence": null
+  },
+  "windows_11_x64": {
+    "passed": false,
+    "tested_on": null,
+    "evidence": null
+  }
+}

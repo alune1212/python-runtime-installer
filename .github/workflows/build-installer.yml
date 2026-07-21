@@ -1,0 +1,135 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install exact target Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13.14"
+          architecture: x64
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: Synchronize and validate inputs
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: |
+          uv sync --frozen
+          if ($env:RELEASE_TAG) {
+            uv run python -m scripts.build.validate_config --tag $env:RELEASE_TAG
+          } else {
+            uv run python -m scripts.build.validate_config
+          }
+          uv run python -m scripts.build.lock_requirements --check
+          uv run python -m scripts.build.validate_vulnerability_exceptions
+          uv run python -m scripts.build.validate_desktop_acceptance
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run pytest
+          uv run python -m scripts.build.scan_repository
+          uv run python -m scripts.build.generate_inno_config
+          git diff --check
+          git diff --exit-code -- installer/generated-config.iss
+          if ((python -c "import platform; print(platform.python_version())") -ne '3.13.14') {
+            throw 'The full build is not running on CPython 3.13.14.'
+          }
+      - name: Validate OpenSpec strictly
+        shell: powershell
+        run: |
+          npm install --global @fission-ai/openspec@1.6.0
+          openspec validate --all --strict
+      - name: Install and run PowerShell gates
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings config/PSScriptAnalyzerSettings.psd1
+          $findings | Format-Table -AutoSize
+          if ($findings) { throw 'PSScriptAnalyzer reported blocking findings.' }
+          Invoke-Pester -Path tests/powershell -CI -Output Detailed
+      - name: Audit locked dependencies
+        shell: powershell
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: uv run python -m scripts.build.audit_dependencies
+      - name: Build verified offline payload
+        shell: powershell
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: ./scripts/build/Prepare-Payload.ps1 -PythonExecutable python
+      - name: Install pinned Inno Setup and compile
+        shell: powershell
+        env:
+          SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $compiler = ./scripts/build/Install-InnoSetup.ps1
+          $signedName = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE) -and -not [string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)
+          ./scripts/build/Compile-Installer.ps1 -InnoCompiler $compiler -BuildCommit $env:GITHUB_SHA -SignedName:$signedName
+      - name: Test the real installer end to end
+        shell: powershell
+        env:
+          SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $suffix = if (-not [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE) -and -not [string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) { '' } else { '-unsigned' }
+          $version = (Get-Content config/product.json -Raw | ConvertFrom-Json).product.version
+          $installer = "installer/output/python-runtime-installer-$version-windows-x64$suffix.exe"
+          ./scripts/build/Test-Installer.ps1 -InstallerPath $installer
+      - name: Finalize and optionally sign release output
+        shell: powershell
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: ./scripts/build/Finalize-Release.ps1
+      - name: Upload complete tested output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-runtime-installer-${{ github.run_id }}
+          path: build/release/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download tested output
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: python-runtime-installer-${{ github.run_id }}
+          path: build/release
+      - name: Validate tag and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('config/product.json'))['product']['version'])")
+          test "$GITHUB_REF_NAME" = "v$version"
+          prerelease=""
+          case "$version" in 0.*) prerelease="--prerelease" ;; esac
+          mapfile -t assets < <(find build/release -maxdepth 1 -type f -print)
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag $prerelease --title "Python Runtime Installer $version" --notes-file docs/release-notes-0.1.0.md

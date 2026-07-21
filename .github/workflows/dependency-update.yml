@@ -1,0 +1,101 @@
+name: Monthly dependency refresh
+
+on:
+  schedule:
+    - cron: "17 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh-and-validate:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install exact target Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13.14"
+          architecture: x64
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: Refresh immutable locks
+        shell: powershell
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: |
+          uv sync --frozen
+          uv run python -m scripts.build.lock_requirements --upgrade
+          uv lock --upgrade
+          uv sync --frozen
+      - name: Run static and security gates
+        shell: powershell
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: |
+          uv run python -m scripts.build.validate_config
+          uv run python -m scripts.build.validate_vulnerability_exceptions
+          uv run python -m scripts.build.validate_desktop_acceptance
+          uv run python -m scripts.build.audit_dependencies
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run pytest
+          uv run python -m scripts.build.scan_repository
+          git diff --check
+      - name: Validate OpenSpec strictly
+        shell: powershell
+        run: |
+          npm install --global @fission-ai/openspec@1.6.0
+          openspec validate --all --strict
+      - name: Run PowerShell and full installer gates
+        shell: powershell
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings config/PSScriptAnalyzerSettings.psd1
+          if ($findings) { $findings | Format-Table -AutoSize; throw 'PSScriptAnalyzer failed.' }
+          Invoke-Pester -Path tests/powershell -CI -Output Detailed
+          ./scripts/build/Prepare-Payload.ps1 -PythonExecutable python
+          $compiler = ./scripts/build/Install-InnoSetup.ps1
+          ./scripts/build/Compile-Installer.ps1 -InnoCompiler $compiler -BuildCommit $env:GITHUB_SHA
+          $version = (Get-Content config/product.json -Raw | ConvertFrom-Json).product.version
+          ./scripts/build/Test-Installer.ps1 -InstallerPath "installer/output/python-runtime-installer-$version-windows-x64-unsigned.exe"
+      - name: Detect unchanged refresh
+        id: changes
+        shell: powershell
+        run: |
+          $changed = -not [string]::IsNullOrWhiteSpace((git status --short -- requirements.txt bootstrap-requirements.txt uv.lock))
+          "changed=$($changed.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if (-not $changed) { Write-Host 'No compatible dependency updates were found.' }
+      - name: Create or update review-only pull request
+        if: steps.changes.outputs.changed == 'true'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $branch = 'automation/monthly-dependency-refresh'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin "${branch}:refs/remotes/origin/${branch}" 2>$null
+          git switch -C $branch
+          git add requirements.txt bootstrap-requirements.txt uv.lock
+          git commit -m 'chore(deps): refresh locked dependencies'
+          git push --force-with-lease origin $branch
+          $existing = gh pr list --head $branch --state open --json number --jq '.[0].number'
+          if ($existing) {
+            gh pr edit $existing --title 'chore(deps): monthly locked dependency refresh' --body-file docs/dependency-refresh-pr.md
+          } else {
+            gh pr create --base main --head $branch --title 'chore(deps): monthly locked dependency refresh' --body-file docs/dependency-refresh-pr.md
+          }
