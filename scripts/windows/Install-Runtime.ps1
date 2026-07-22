@@ -7,6 +7,7 @@ param(
     [string]$BuildCommit = 'local',
     [string]$StatusPath = '',
     [switch]$ForceBundled,
+    [switch]$AllowWindowsServerForE2E,
     [switch]$TestFailAfterStagingVerification
 )
 
@@ -50,7 +51,10 @@ try {
     $pythonInstallerPath = Join-Path $PayloadRoot ([string]$config.target.python.filename)
     $discoverySnapshot = Get-DiscoveryMetadataSnapshot -RegistryPath ([string]$config.product.registry_path)
 
-    Assert-WindowsPreflight -AppRoot $AppRoot -MinimumFreeBytes ([Int64]$config.target.minimum_free_bytes)
+    Assert-WindowsPreflight `
+        -AppRoot $AppRoot `
+        -MinimumFreeBytes ([Int64]$config.target.minimum_free_bytes) `
+        -AllowWindowsServerForE2E:$AllowWindowsServerForE2E
     $payloadManifest = Test-PayloadManifest -PayloadRoot $PayloadRoot -ManifestPath $payloadManifestPath
 
     $installedManifest = $null

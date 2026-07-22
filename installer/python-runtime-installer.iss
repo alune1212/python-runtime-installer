@@ -132,6 +132,14 @@ begin
   end;
 end;
 
+function IsGitHubHostedServerE2EAllowed(): Boolean;
+begin
+  Result :=
+    HasCommandLineSwitch('/E2EALLOWWINDOWSSERVER') and
+    (CompareText(GetEnv('GITHUB_ACTIONS'), 'true') = 0) and
+    (CompareText(GetEnv('RUNNER_ENVIRONMENT'), 'github-hosted') = 0);
+end;
+
 function TryParseSemVer(const Value: String; var Major, Minor, Patch: Integer): Boolean;
 var
   FirstDot: Integer;
@@ -180,6 +188,14 @@ begin
   Result := SystemInfo.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
   if not Result and not WizardSilent then
     MsgBox(CustomMessage('UnsupportedArchitecture'), mbError, MB_OK);
+  if Result and HasCommandLineSwitch('/E2EALLOWWINDOWSSERVER') and
+     not IsGitHubHostedServerE2EAllowed() then
+  begin
+    Result := False;
+    Log('Rejected unauthorized test-only Windows Server E2E override.');
+    if not WizardSilent then
+      MsgBox(CustomMessage('UnsupportedArchitecture'), mbError, MB_OK);
+  end;
   if Result and RegQueryStringValue(
     HKLM,
     'SOFTWARE\Microsoft\Windows NT\CurrentVersion',
@@ -187,9 +203,14 @@ begin
     ProductName
   ) and (Pos('Server', ProductName) > 0) then
   begin
-    Result := False;
-    if not WizardSilent then
-      MsgBox(CustomMessage('UnsupportedArchitecture'), mbError, MB_OK);
+    if IsGitHubHostedServerE2EAllowed() then
+      Log('Accepted test-only Windows Server preflight override for GitHub-hosted E2E.')
+    else
+    begin
+      Result := False;
+      if not WizardSilent then
+        MsgBox(CustomMessage('UnsupportedArchitecture'), mbError, MB_OK);
+    end;
   end;
   if Result and RegQueryStringValue(
     HKCU,
@@ -255,6 +276,8 @@ begin
     '-StatusPath "' + StatusPath + '"';
   if HasCommandLineSwitch('/FORCEBUNDLED') then
     Parameters := Parameters + ' -ForceBundled';
+  if IsGitHubHostedServerE2EAllowed() then
+    Parameters := Parameters + ' -AllowWindowsServerForE2E';
   if HasCommandLineSwitch('/E2EFAILAFTERSTAGING') then
     Parameters := Parameters + ' -TestFailAfterStagingVerification';
 

@@ -161,11 +161,27 @@ function Get-NativeWindowsArchitecture {
     return $architecture.ToUpperInvariant()
 }
 
+function Test-WindowsServerE2EOverrideAllowed {
+    [CmdletBinding()]
+    param(
+        [switch]$Requested,
+        [AllowEmptyString()][string]$GitHubActions = $env:GITHUB_ACTIONS,
+        [AllowEmptyString()][string]$RunnerEnvironment = $env:RUNNER_ENVIRONMENT
+    )
+
+    return (
+        $Requested.IsPresent -and
+        [StringComparer]::OrdinalIgnoreCase.Equals($GitHubActions, 'true') -and
+        [StringComparer]::OrdinalIgnoreCase.Equals($RunnerEnvironment, 'github-hosted')
+    )
+}
+
 function Assert-WindowsPreflight {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$AppRoot,
-        [Parameter(Mandatory = $true)][Int64]$MinimumFreeBytes
+        [Parameter(Mandatory = $true)][Int64]$MinimumFreeBytes,
+        [switch]$AllowWindowsServerForE2E
     )
 
     $version = [Environment]::OSVersion.Version
@@ -173,7 +189,14 @@ function Assert-WindowsPreflight {
         throw "Unsupported Windows version: $version"
     }
     $productName = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name ProductName -ErrorAction Stop).ProductName
-    if ($productName -match 'Server') {
+    $serverE2EOverrideAllowed = Test-WindowsServerE2EOverrideAllowed -Requested:$AllowWindowsServerForE2E
+    if ($AllowWindowsServerForE2E -and -not $serverE2EOverrideAllowed) {
+        throw 'The Windows Server E2E preflight override requires a GitHub-hosted Actions runner.'
+    }
+    if ($serverE2EOverrideAllowed -and $productName -notmatch 'Server') {
+        throw "The Windows Server E2E preflight override is only valid on Windows Server: $productName"
+    }
+    if ($productName -match 'Server' -and -not $serverE2EOverrideAllowed) {
         throw "Windows Server is not a supported target: $productName"
     }
     $architecture = Get-NativeWindowsArchitecture
@@ -185,7 +208,7 @@ function Assert-WindowsPreflight {
     if ($drive.AvailableFreeSpace -lt $MinimumFreeBytes) {
         throw "Insufficient disk space. Required=$MinimumFreeBytes Available=$($drive.AvailableFreeSpace)"
     }
-    Write-InstallerLog -Stage 'preflight' -Message ("Supported host: {0}; arch={1}; free={2}" -f $productName, $architecture, $drive.AvailableFreeSpace)
+    Write-InstallerLog -Stage 'preflight' -Message ("Supported host: {0}; arch={1}; free={2}; windows_server_e2e_override={3}" -f $productName, $architecture, $drive.AvailableFreeSpace, $serverE2EOverrideAllowed)
 }
 
 function Test-IsCandidatePathAllowed {

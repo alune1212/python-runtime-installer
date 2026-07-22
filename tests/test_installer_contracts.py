@@ -143,6 +143,38 @@ def test_end_to_end_reports_process_failure_before_log_discovery() -> None:
     assert "<redacted-github-token>" in test_script
 
 
+def test_windows_server_e2e_override_is_explicit_and_github_hosted_only() -> None:
+    project = read("installer/python-runtime-installer.iss")
+    install = read("scripts/windows/Install-Runtime.ps1")
+    runtime = read("scripts/windows/RuntimeInstaller.psm1")
+    harness = read("scripts/build/Test-Installer.ps1")
+
+    for required in (
+        "HasCommandLineSwitch('/E2EALLOWWINDOWSSERVER')",
+        "CompareText(GetEnv('GITHUB_ACTIONS'), 'true') = 0",
+        "CompareText(GetEnv('RUNNER_ENVIRONMENT'), 'github-hosted') = 0",
+        "not IsGitHubHostedServerE2EAllowed()",
+        "Parameters := Parameters + ' -AllowWindowsServerForE2E';",
+    ):
+        assert required in project
+    assert "[switch]$AllowWindowsServerForE2E" in install
+    assert "-AllowWindowsServerForE2E:$AllowWindowsServerForE2E" in install
+    assert "Test-WindowsServerE2EOverrideAllowed" in runtime
+    assert "if ($AllowWindowsServerForE2E -and -not $serverE2EOverrideAllowed)" in runtime
+    assert "if ($productName -match 'Server' -and -not $serverE2EOverrideAllowed)" in runtime
+    for required in (
+        "$isWindowsServer = $windowsProductName -match 'Server'",
+        "[StringComparer]::OrdinalIgnoreCase.Equals([string]$env:GITHUB_ACTIONS, 'true')",
+        "[StringComparer]::OrdinalIgnoreCase.Equals("
+        "[string]$env:RUNNER_ENVIRONMENT, 'github-hosted')",
+        "$allowWindowsServerForE2E = $isWindowsServer -and $isGitHubHostedRunner",
+        "if ($allowWindowsServerForE2E)",
+        "windows_server_e2e_override = $allowWindowsServerForE2E",
+    ):
+        assert required in harness
+    assert harness.count("/E2EALLOWWINDOWSSERVER") == 1
+
+
 def test_private_runtime_uninstall_removes_saved_installer() -> None:
     module = read("scripts/windows/RuntimeInstaller.psm1")
     assert "Remove-Item -LiteralPath $savedInstaller -Force" in module

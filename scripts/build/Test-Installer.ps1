@@ -50,6 +50,16 @@ $nativeArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHI
         -Name 'PROCESSOR_ARCHITECTURE' `
         -ErrorAction Stop).PROCESSOR_ARCHITECTURE
 }
+$windowsProductName = [string](Get-ItemProperty `
+    -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+    -Name ProductName `
+    -ErrorAction Stop).ProductName
+$isWindowsServer = $windowsProductName -match 'Server'
+$isGitHubHostedRunner = (
+    [StringComparer]::OrdinalIgnoreCase.Equals([string]$env:GITHUB_ACTIONS, 'true') -and
+    [StringComparer]::OrdinalIgnoreCase.Equals([string]$env:RUNNER_ENVIRONMENT, 'github-hosted')
+)
+$allowWindowsServerForE2E = $isWindowsServer -and $isGitHubHostedRunner
 $evidence = [ordered]@{
     schema_version = 1
     collected_at = [DateTime]::UtcNow.ToString('o')
@@ -58,6 +68,8 @@ $evidence = [ordered]@{
         architecture = $nativeArchitecture
         powershell_version = $PSVersionTable.PSVersion.ToString()
         powershell_edition = [string]$PSVersionTable.PSEdition
+        product_name = $windowsProductName
+        windows_server_e2e_override = $allowWindowsServerForE2E
     }
     installer = [ordered]@{
         path = $InstallerPath
@@ -202,6 +214,9 @@ if ($InstallerPath.EndsWith('-unsigned.exe', [StringComparison]::OrdinalIgnoreCa
 }
 
 $setupArguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ("/LOG={0}" -f $setupLog))
+if ($allowWindowsServerForE2E) {
+    $setupArguments += '/E2EALLOWWINDOWSSERVER'
+}
 Invoke-Setup -Path $InstallerPath -Phase 'forced_private_install' -Arguments ($setupArguments + '/FORCEBUNDLED') | Out-Null
 
 Test-E2ECondition (Test-Path -LiteralPath $pythonPath -PathType Leaf) "Managed Python missing: $pythonPath"

@@ -88,6 +88,90 @@ Describe 'Candidate selection' {
     }
 }
 
+Describe 'Windows Server E2E preflight policy' {
+    BeforeEach {
+        $script:savedGitHubActions = $env:GITHUB_ACTIONS
+        $script:savedRunnerEnvironment = $env:RUNNER_ENVIRONMENT
+        $env:GITHUB_ACTIONS = $null
+        $env:RUNNER_ENVIRONMENT = $null
+        Mock Get-ItemProperty {
+            [PSCustomObject]@{ ProductName = 'Microsoft Windows Server 2025 Datacenter' }
+        } -ModuleName RuntimeInstaller
+        Mock Get-NativeWindowsArchitecture { 'AMD64' } -ModuleName RuntimeInstaller
+        Mock Write-InstallerLog {} -ModuleName RuntimeInstaller
+    }
+
+    AfterEach {
+        $env:GITHUB_ACTIONS = $script:savedGitHubActions
+        $env:RUNNER_ENVIRONMENT = $script:savedRunnerEnvironment
+    }
+
+    It 'rejects Windows Server by default even on a GitHub-hosted runner' {
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0
+        } | Should -Throw '*Windows Server is not a supported target*'
+    }
+
+    It 'rejects the explicit override when GITHUB_ACTIONS is missing' {
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0 -AllowWindowsServerForE2E
+        } | Should -Throw '*requires a GitHub-hosted Actions runner*'
+    }
+
+    It 'rejects the explicit override when RUNNER_ENVIRONMENT is missing' {
+        $env:GITHUB_ACTIONS = 'true'
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0 -AllowWindowsServerForE2E
+        } | Should -Throw '*requires a GitHub-hosted Actions runner*'
+    }
+
+    It 'allows the edition override only with both GitHub-hosted markers' {
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0 -AllowWindowsServerForE2E
+        } | Should -Not -Throw
+    }
+
+    It 'does not bypass the AMD64 architecture check' {
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+        Mock Get-NativeWindowsArchitecture { 'ARM64' } -ModuleName RuntimeInstaller
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0 -AllowWindowsServerForE2E
+        } | Should -Throw '*Unsupported Windows architecture*'
+    }
+
+    It 'does not bypass the free-space check' {
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes ([Int64]::MaxValue) -AllowWindowsServerForE2E
+        } | Should -Throw '*Insufficient disk space*'
+    }
+
+    It 'rejects the override on a desktop product name' {
+        $env:GITHUB_ACTIONS = 'true'
+        $env:RUNNER_ENVIRONMENT = 'github-hosted'
+        Mock Get-ItemProperty {
+            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
+        } -ModuleName RuntimeInstaller
+
+        {
+            Assert-WindowsPreflight -AppRoot $TestDrive -MinimumFreeBytes 0 -AllowWindowsServerForE2E
+        } | Should -Throw '*only valid on Windows Server*'
+    }
+}
+
 Describe 'Lifecycle primitives' {
     It 'encodes quoted and trailing-backslash process arguments for Windows argv parsing' {
         InModuleScope RuntimeInstaller {
