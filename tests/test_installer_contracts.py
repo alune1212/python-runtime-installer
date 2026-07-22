@@ -106,6 +106,7 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "/E2EFAILAFTERSTAGING",
         "custom_drift-1.0.dist-info",
         "runtime_ownership -eq 'reused'",
+        "dict(version=platform.python_version()",
         "Reused CPython was removed by uninstall",
         "failed_staging",
         "installer-e2e-evidence.json",
@@ -127,6 +128,11 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "SysVersion",
     ):
         assert required in test_script
+
+
+def test_private_runtime_uninstall_removes_saved_installer() -> None:
+    module = read("scripts/windows/RuntimeInstaller.psm1")
+    assert "Remove-Item -LiteralPath $savedInstaller -Force" in module
 
 
 def test_generated_inno_config_is_current_and_app_id_is_escaped() -> None:

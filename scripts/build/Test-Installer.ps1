@@ -195,7 +195,7 @@ Test-E2ECondition `
     ([StringComparer]::OrdinalIgnoreCase.Equals([string]$manifest.base_python, $privatePythonPath)) `
     'Manifest base Python is not the fixed private path.'
 
-$runtimeProbe = & $pythonPath -I -c 'import json,platform,sys;print(json.dumps({"version":platform.python_version(),"bits":platform.architecture()[0],"implementation":sys.implementation.name}))'
+$runtimeProbe = & $pythonPath -I -c 'import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),bits=platform.architecture()[0],implementation=sys.implementation.name)))'
 Test-E2ECondition ($LASTEXITCODE -eq 0) 'Managed runtime identity probe failed.'
 $runtimeIdentity = $runtimeProbe | ConvertFrom-Json
 Test-E2ECondition `
@@ -418,7 +418,7 @@ $evidence['private_uninstall'] = [ordered]@{
 $externalPython = (Get-Command python.exe -ErrorAction Stop).Source
 $externalHash = (Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash
 $externalLength = (Get-Item -LiteralPath $externalPython).Length
-$externalProbeText = & $externalPython -I -c 'import json,platform,sys;print(json.dumps({"version":platform.python_version(),"bits":platform.architecture()[0],"implementation":sys.implementation.name}))'
+$externalProbeText = & $externalPython -I -c 'import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),bits=platform.architecture()[0],implementation=sys.implementation.name)))'
 Test-E2ECondition ($LASTEXITCODE -eq 0) 'Controlled external Python probe failed.'
 $externalIdentity = $externalProbeText | ConvertFrom-Json
 $blockedExternalPath = $externalPython.ToLowerInvariant() -match '\\(windowsapps|anaconda|miniconda|conda|embedded)\\'

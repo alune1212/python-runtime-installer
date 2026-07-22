@@ -139,6 +139,20 @@ Describe 'Lifecycle primitives' {
         New-Item -ItemType Directory -Path $app | Out-Null
         { Remove-OwnedDirectory -AppRoot $app -Path $TestDrive } | Should -Throw '*outside*'
     }
+
+    It 'removes the saved private Python installer after uninstall' {
+        $app = Join-Path $TestDrive 'private-uninstall'
+        $maintenance = Join-Path $app 'maintenance'
+        New-Item -ItemType Directory -Path $maintenance | Out-Null
+        $savedInstaller = Join-Path $maintenance 'python-installer.exe'
+        Set-Content -LiteralPath $savedInstaller -Value 'fixture'
+        Mock Invoke-LoggedProcess { 0 } -ModuleName RuntimeInstaller
+
+        Uninstall-PrivatePython -AppRoot $app -InstallerFilename 'python-installer.exe'
+
+        Test-Path -LiteralPath $savedInstaller | Should -BeFalse
+        Should -Invoke Invoke-LoggedProcess -ModuleName RuntimeInstaller -Times 1 -Exactly
+    }
 }
 
 Describe 'Logging retention' {

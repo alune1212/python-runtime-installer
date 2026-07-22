@@ -426,6 +426,10 @@ function Uninstall-PrivatePython {
             Invoke-LoggedProcess -FilePath $savedInstaller -Arguments @('/uninstall', '/quiet') -Stage 'python-uninstall' -AllowedExitCodes @(0, 1605, 3010) | Out-Null
         } catch {
             Write-InstallerLog -Stage 'python-uninstall' -Level 'WARN' -Message $_.Exception.Message
+        } finally {
+            if (Test-Path -LiteralPath $savedInstaller -PathType Leaf) {
+                Remove-Item -LiteralPath $savedInstaller -Force
+            }
         }
     }
 }
