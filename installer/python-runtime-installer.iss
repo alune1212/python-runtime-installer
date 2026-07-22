@@ -83,7 +83,7 @@ Source: "..\scripts\windows\Open-Environment.cmd"; DestDir: "{app}"; Flags: igno
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Open Python Environment Terminal"; Filename: "{app}\Open-Environment.cmd"; WorkingDir: "{userprofile}"
+Name: "{group}\Open Python Environment Terminal"; Filename: "{app}\Open-Environment.cmd"; WorkingDir: "{%USERPROFILE|{userdocs}}"
 Name: "{group}\Open Installation Logs"; Filename: "{win}\explorer.exe"; Parameters: """{localappdata}\PythonRuntimeInstaller\Logs"""
 Name: "{group}\Uninstall Python Runtime Installer"; Filename: "{uninstallexe}"
 

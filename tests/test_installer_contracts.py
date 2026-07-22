@@ -51,6 +51,7 @@ def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> Non
         'Name: "chinesesimplified"',
         "/FORCEBUNDLED",
         "ExecutionPolicy Bypass",
+        'WorkingDir: "{%USERPROFILE|{userdocs}}"',
         "ChangesEnvironment=no",
         "RestartApplications=no",
         "CompareSemVer(InstalledVersion, '{#ProductVersion}') > 0",
@@ -59,6 +60,7 @@ def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> Non
         assert required in project
     assert "{commondesktop}" not in project
     assert "{userdesktop}" not in project
+    assert "{userprofile}" not in project
 
 
 def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
