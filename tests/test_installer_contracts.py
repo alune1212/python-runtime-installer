@@ -128,6 +128,8 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "SysVersion",
     ):
         assert required in test_script
+    assert "Set-Item -LiteralPath $pythonRegistry -Value" in test_script
+    assert "(Get-Item -LiteralPath $pythonRegistry).SetValue" not in test_script
 
 
 def test_private_runtime_uninstall_removes_saved_installer() -> None:

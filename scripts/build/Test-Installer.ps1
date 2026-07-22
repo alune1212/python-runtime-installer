@@ -439,7 +439,7 @@ try {
     New-ItemProperty -Path $pythonRegistryTag -Name Version -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $pythonRegistryTag -Name SysVersion -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $pythonRegistryTag -Name SysArchitecture -Value '64bit' -PropertyType String -Force | Out-Null
-    (Get-Item -LiteralPath $pythonRegistry).SetValue('', (Split-Path -Parent $externalPython), [Microsoft.Win32.RegistryValueKind]::String)
+    Set-Item -LiteralPath $pythonRegistry -Value (Split-Path -Parent $externalPython)
     New-ItemProperty -Path $pythonRegistry -Name ExecutablePath -Value $externalPython -PropertyType String -Force | Out-Null
     Invoke-Setup -Path $InstallerPath -Phase 'reuse_install' -Arguments $setupArguments | Out-Null
     $reuseManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
