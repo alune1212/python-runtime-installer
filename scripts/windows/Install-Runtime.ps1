@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RequirementsPath,
     [string]$BuildCommit = 'local',
     [string]$StatusPath = '',
-    [switch]$ForceBundled
+    [switch]$ForceBundled,
+    [switch]$TestFailAfterStagingVerification
 )
 
 Set-StrictMode -Version Latest
@@ -20,6 +21,8 @@ $previousRoot = $null
 $privateRuntimeNew = $false
 $activationAttempted = $false
 $activationCommitted = $false
+$manifestWasPresent = $false
+$manifestPublished = $false
 $previousManifestPath = $null
 $operation = 'install'
 $discoverySnapshot = $null
@@ -51,7 +54,8 @@ try {
     $payloadManifest = Test-PayloadManifest -PayloadRoot $PayloadRoot -ManifestPath $payloadManifestPath
 
     $installedManifest = $null
-    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    $manifestWasPresent = Test-Path -LiteralPath $manifestPath -PathType Leaf
+    if ($manifestWasPresent) {
         $installedManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $versionComparison = Compare-InstallerVersion -InstalledVersion ([string]$installedManifest.installer_version) -IncomingVersion $incomingVersion
         if ($versionComparison -gt 0) {
@@ -59,7 +63,7 @@ try {
             Write-InstallStatus -Value 'downgrade-blocked' -Path $StatusPath
             exit 21
         }
-        if ($versionComparison -eq 0 -and (Test-Path -LiteralPath $activePython -PathType Leaf)) {
+        if ($versionComparison -eq 0 -and (Test-Path -LiteralPath $activePython -PathType Leaf) -and -not $TestFailAfterStagingVerification) {
             try {
                 Invoke-LoggedProcess -FilePath $activePython -Arguments @(
                     $verifierPath,
@@ -69,7 +73,7 @@ try {
                     '--expected-executable', $activePython,
                     '--manifest', $manifestPath
                 ) -Stage 'repair-check' | Out-Null
-                Publish-DiscoveryMetadata -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
+                Publish-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
                 Write-InstallerLog -Stage 'complete' -Message 'Existing environment is healthy; no rebuild required.'
                 Write-InstallStatus -Value 'healthy' -Path $StatusPath
                 exit 0
@@ -82,6 +86,10 @@ try {
         }
     }
 
+    if ($TestFailAfterStagingVerification -and $installedManifest -and $versionComparison -eq 0 -and (Test-Path -LiteralPath $activePython -PathType Leaf)) {
+        $operation = 'repair'
+        Write-InstallerLog -Stage 'test-injection' -Message 'Test-only failure requested after staging verification.'
+    }
     [System.IO.Directory]::CreateDirectory($AppRoot) | Out-Null
     $basePython = $null
     $runtimeOwnership = 'reused'
@@ -141,6 +149,9 @@ try {
         '--expected-executable', $stagePython,
         '--output', $stageResult
     ) -Stage 'verification' | Out-Null
+    if ($TestFailAfterStagingVerification) {
+        throw 'Test-only failure after successful staging verification.'
+    }
 
     if (Test-Path -LiteralPath $activeRoot) {
         $previousRoot = Join-Path $AppRoot ('.previous-' + $transactionId)
@@ -194,13 +205,15 @@ try {
         verification_status = 'passed'
     }
     if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-        $previousManifestPath = Join-Path $AppRoot ('.previous-manifest-' + $transactionId + '.json')
-        Copy-Item -LiteralPath $manifestPath -Destination $previousManifestPath
+        $manifestBackupPath = Join-Path $AppRoot ('.previous-manifest-' + $transactionId + '.json')
+        Copy-Item -LiteralPath $manifestPath -Destination $manifestBackupPath
+        $previousManifestPath = $manifestBackupPath
     }
     $temporaryManifestPath = Join-Path $AppRoot ('.manifest-' + $transactionId + '.json')
     [System.IO.File]::WriteAllText($temporaryManifestPath, ($installed | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $temporaryManifestPath -Destination $manifestPath -Force
-    Publish-DiscoveryMetadata -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
+    $manifestPublished = $true
+    Publish-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
     $activationCommitted = $true
 
     if ($previousRoot -and (Test-Path -LiteralPath $previousRoot)) {
@@ -243,11 +256,11 @@ try {
         }
         if ($previousManifestPath -and (Test-Path -LiteralPath $previousManifestPath)) {
             Move-Item -LiteralPath $previousManifestPath -Destination (Join-Path $AppRoot 'manifest.json') -Force
-        } elseif ($activationAttempted -and (Test-Path -LiteralPath (Join-Path $AppRoot 'manifest.json'))) {
+        } elseif ($manifestPublished -and -not $manifestWasPresent -and (Test-Path -LiteralPath (Join-Path $AppRoot 'manifest.json'))) {
             Remove-Item -LiteralPath (Join-Path $AppRoot 'manifest.json') -Force
         }
         if ($discoverySnapshot) {
-            Restore-DiscoveryMetadata -RegistryPath ([string]$config.product.registry_path) -Snapshot $discoverySnapshot
+            Restore-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -Snapshot $discoverySnapshot
         }
         if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
             Remove-OwnedDirectory -AppRoot $AppRoot -Path $stageRoot

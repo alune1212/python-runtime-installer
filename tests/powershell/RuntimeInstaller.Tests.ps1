@@ -15,6 +15,33 @@ Describe 'Candidate selection' {
         Test-IsCandidatePathAllowed 'C:\Users\测试 用户\Python313\python.exe' | Should -BeTrue
     }
 
+    It 'enumerates PythonCore PEP 514 tags and prioritizes exact patch metadata' {
+        Mock Test-Path { $true } -ModuleName RuntimeInstaller
+        Mock Write-InstallerLog { param($Stage, $Message, $Level); throw $Message } -ModuleName RuntimeInstaller
+        Mock Get-ChildItem {
+            @(
+                [PSCustomObject]@{ PSPath = 'HKCU:\Software\Python\PythonCore\3.13' },
+                [PSCustomObject]@{ PSPath = 'HKCU:\Software\Python\PythonCore\3.13-e2e' }
+            )
+        } -ModuleName RuntimeInstaller
+        Mock Get-ItemProperty {
+            param($LiteralPath)
+            if ($LiteralPath -like '*\InstallPath') {
+                $executable = if ($LiteralPath -like '*e2e*') { 'C:\Exact\python.exe' } else { 'C:\Fallback\python.exe' }
+                return [PSCustomObject]@{ ExecutablePath = $executable }
+            }
+            $sysVersion = if ($LiteralPath -like '*e2e*') { '3.13.14' } else { '3.13' }
+            return [PSCustomObject]@{ SysVersion = $sysVersion }
+        } -ModuleName RuntimeInstaller
+
+        $registered = @(InModuleScope RuntimeInstaller {
+            Get-RegisteredPythonCandidate -RegistryBase 'HKCU:\Software\Python\PythonCore' -ExpectedVersion '3.13.14'
+        })
+        Should -Invoke Get-ItemProperty -ModuleName RuntimeInstaller -Times 2 -ParameterFilter { $LiteralPath -like '*e2e*' }
+        $registered | Should -HaveCount 2
+        $registered[0] | Should -Be 'C:\Exact\python.exe'
+    }
+
     It 'selects only the first candidate that passes the exact health probe' {
         Mock Get-PythonCandidate { @('C:\Python312\python.exe', 'C:\Python313\python.exe') } -ModuleName RuntimeInstaller
         Mock Test-CompatiblePython {
@@ -62,6 +89,15 @@ Describe 'Candidate selection' {
 }
 
 Describe 'Lifecycle primitives' {
+    It 'encodes quoted and trailing-backslash process arguments for Windows argv parsing' {
+        InModuleScope RuntimeInstaller {
+            ConvertTo-ProcessArgument -Value 'plain' | Should -Be 'plain'
+            ConvertTo-ProcessArgument -Value 'with space' | Should -Be '"with space"'
+            ConvertTo-ProcessArgument -Value 'say "hello"' | Should -Be '"say \"hello\""'
+            ConvertTo-ProcessArgument -Value 'C:\path with space\' | Should -Be '"C:\path with space\\"'
+        }
+    }
+
     It 'falls back to the system environment registry for native architecture' {
         $savedArchitecture = $env:PROCESSOR_ARCHITECTURE
         $savedWowArchitecture = $env:PROCESSOR_ARCHITEW6432

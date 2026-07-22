@@ -69,12 +69,26 @@ $evidence = [ordered]@{
     }
     commands = [ordered]@{}
     exit_codes = [ordered]@{}
+    log_paths = [ordered]@{}
 }
 
 function Test-E2ECondition([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Get-InstallerLogSnapshot {
+    return @(Get-ChildItem -LiteralPath $logRoot -Filter 'installer-*.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending)
+}
+
+function Get-NewInstallerLogPath([string[]]$BeforePaths, [string]$Pattern, [string]$Phase) {
+    $newLogs = @(Get-ChildItem -LiteralPath $logRoot -Filter $Pattern -File -ErrorAction SilentlyContinue |
+            Where-Object { $BeforePaths -notcontains $_.FullName } |
+            Sort-Object LastWriteTimeUtc -Descending)
+    Test-E2ECondition ($newLogs.Count -gt 0) "Installer phase $Phase did not create the expected technical log."
+    return $newLogs[0].FullName
 }
 
 function Test-PathsUnchanged([string]$ExpectedUserPath, [string]$ExpectedMachinePath) {
@@ -125,9 +139,12 @@ function Invoke-Setup(
     [string]$Phase,
     [int[]]$AllowedExitCodes = @(0)
 ) {
+    $logsBefore = @(Get-InstallerLogSnapshot | Select-Object -ExpandProperty FullName)
     $script:evidence.commands[$Phase] = "$([System.IO.Path]::GetFileName($Path)) $($Arguments -join ' ')"
     $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
     $script:evidence.exit_codes[$Phase] = $process.ExitCode
+    $script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath -BeforePaths $logsBefore -Pattern 'installer-install-*.log' -Phase $Phase
+
     if ($AllowedExitCodes -notcontains $process.ExitCode) {
         throw "Installer phase $Phase exited with $($process.ExitCode). See $setupLog"
     }
@@ -329,30 +346,22 @@ $evidence['drift_repair'] = [ordered]@{
     verification_checks = @($repairVerification.checks)
 }
 
-$healthyManifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+$healthyManifestHashBeforeFailure = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
 $healthyPythonHash = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash
-$failureManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$failureManifest.verification_status = 'failed'
-[System.IO.File]::WriteAllText($manifestPath, ($failureManifest | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
 $stagingParent = Join-Path $appRoot '.staging'
-$stagingParentExisted = Test-Path -LiteralPath $stagingParent -PathType Container
-if ($stagingParentExisted) {
-    Test-E2ECondition (@(Get-ChildItem -LiteralPath $stagingParent -Force).Count -eq 0) 'The staging root is not empty before the failure fixture.'
-    [System.IO.Directory]::Delete($stagingParent, $false)
-}
-[System.IO.File]::WriteAllText($stagingParent, 'recoverable e2e staging blocker', [Text.Encoding]::ASCII)
-try {
-    $failedExitCode = Invoke-Setup -Path $InstallerPath -Phase 'failed_staging' -AllowedExitCodes @(20) -Arguments $setupArguments
-    Test-E2ECondition ($failedExitCode -eq 20) 'The staging failure returned an unexpected exit code.'
-    Test-E2ECondition ((Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash -eq $healthyPythonHash) 'Failed staging replaced active Python.'
-    Test-RegistryValueSet -Expected $expectedDiscovery
-} finally {
-    [System.IO.File]::Delete($stagingParent)
-    if ($stagingParentExisted) {
-        [System.IO.Directory]::CreateDirectory($stagingParent) | Out-Null
-    }
-    [System.IO.File]::WriteAllBytes($manifestPath, $healthyManifestBytes)
-}
+$failedExitCode = Invoke-Setup -Path $InstallerPath -Phase 'failed_staging' -AllowedExitCodes @(20) -Arguments ($setupArguments + '/E2EFAILAFTERSTAGING')
+Test-E2ECondition ($failedExitCode -eq 20) 'The staging failure returned an unexpected exit code.'
+Test-E2ECondition ((Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash -eq $healthyPythonHash) 'Failed staging replaced active Python.'
+Test-E2ECondition ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -eq $healthyManifestHashBeforeFailure) 'Failed staging replaced the healthy manifest.'
+$stagingEntries = @(Get-ChildItem -LiteralPath $stagingParent -Force -ErrorAction SilentlyContinue)
+Test-E2ECondition ($stagingEntries.Count -eq 0) 'Failed staging content was not cleaned.'
+$previousEntries = @(Get-ChildItem -LiteralPath $appRoot -Directory -Filter '.previous-*' -ErrorAction SilentlyContinue)
+Test-E2ECondition ($previousEntries.Count -eq 0) 'Failed staging created a previous active environment.'
+Test-RegistryValueSet -Expected $expectedDiscovery
+$failedStagingLog = Get-Item -LiteralPath ([string]$evidence.log_paths['failed_staging'])
+$failedStagingLogText = Get-Content -LiteralPath $failedStagingLog.FullName -Raw -Encoding UTF8
+Test-E2ECondition ($failedStagingLogText -match '\[verification\] Exit code: 0') 'Failure injection occurred before staging verification passed.'
+Test-E2ECondition ($failedStagingLogText.Contains('Test-only failure after successful staging verification.')) 'Expected staging failure evidence is missing from the log.'
 $recoveryResultPath = Join-Path $temporaryRoot ("python-runtime-recovery-{0}.json" -f [Guid]::NewGuid().ToString('N'))
 try {
     $recoveryVerification = Invoke-ManagedVerification -Path $pythonPath -ResultPath $recoveryResultPath -Phase 'failed_staging_preserved_environment_verification'
@@ -363,33 +372,47 @@ $evidence['failed_staging'] = [ordered]@{
     exit_code = $failedExitCode
     active_python_sha256_before = $healthyPythonHash.ToLowerInvariant()
     active_python_sha256_after = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    manifest_restored = ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -eq $repairedManifestHash)
+    manifest_preserved = ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -eq $healthyManifestHashBeforeFailure)
     discovery_preserved = $true
+    staging_verified = $true
+    log_path = $failedStagingLog.FullName
     verification_checks = @($recoveryVerification.checks)
 }
 
-$logsBeforePrivateUninstall = @(Get-ChildItem -LiteralPath $logRoot -Filter 'installer-*.log' -File | Select-Object -ExpandProperty FullName)
+$logsBeforePrivateUninstall = @(Get-InstallerLogSnapshot)
 Test-E2ECondition ($logsBeforePrivateUninstall.Count -gt 0) 'No installer logs exist before uninstall.'
+$privateLogPathsBefore = @($logsBeforePrivateUninstall | Select-Object -ExpandProperty FullName)
+$privateLogsGuaranteedRetained = @($logsBeforePrivateUninstall | Select-Object -First 19 -ExpandProperty FullName)
 $uninstaller = Join-Path $appRoot 'unins000.exe'
 Test-E2ECondition (Test-Path -LiteralPath $uninstaller -PathType Leaf) 'Uninstaller is missing.'
 $evidence.commands['private_uninstall'] = "$([System.IO.Path]::GetFileName($uninstaller)) /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
 $privateUninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
 $evidence.exit_codes['private_uninstall'] = $privateUninstall.ExitCode
+$privateUninstallLog = Get-NewInstallerLogPath -BeforePaths $privateLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'private_uninstall'
+$evidence.log_paths['private_uninstall'] = $privateUninstallLog
 Test-E2ECondition ($privateUninstall.ExitCode -eq 0) 'Private-runtime uninstall failed.'
 Test-E2ECondition (-not (Test-Path -LiteralPath (Join-Path $appRoot 'venv'))) 'Managed environment survived uninstall.'
 Test-E2ECondition (-not (Test-Path -LiteralPath $privatePythonPath -PathType Leaf)) 'Private CPython survived uninstall.'
+Test-E2ECondition (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) 'Installed manifest survived uninstall.'
 Test-E2ECondition (-not (Test-Path -LiteralPath $registryPath)) 'Discovery metadata survived uninstall.'
 Test-E2ECondition (-not (Test-Path -LiteralPath $startMenu)) 'Start menu shortcuts survived uninstall.'
-foreach ($retainedLog in $logsBeforePrivateUninstall) {
+Test-E2ECondition (-not (Test-Path -LiteralPath $appRoot)) 'Application root survived uninstall.'
+foreach ($retainedLog in $privateLogsGuaranteedRetained) {
     Test-E2ECondition (Test-Path -LiteralPath $retainedLog -PathType Leaf) "Uninstall removed retained log: $retainedLog"
 }
 Test-PathsUnchanged -ExpectedUserPath $userPathBefore -ExpectedMachinePath $machinePathBefore
+$logsAfterPrivateUninstall = @(Get-InstallerLogSnapshot)
+Test-E2ECondition ($logsAfterPrivateUninstall.Count -le 20) 'Private-runtime uninstall exceeded the newest-20 log retention bound.'
 $evidence['private_uninstall'] = [ordered]@{
     managed_environment_removed = $true
     private_python_removed = $true
+    manifest_removed = $true
+    application_root_removed = $true
     registry_removed = $true
     start_menu_removed = $true
-    retained_log_count = $logsBeforePrivateUninstall.Count
+    log_path = $privateUninstallLog
+    retained_log_count = $logsAfterPrivateUninstall.Count
+    retained_prior_log_count = $privateLogsGuaranteedRetained.Count
 }
 
 $externalPython = (Get-Command python.exe -ErrorAction Stop).Source
@@ -403,23 +426,20 @@ Test-E2ECondition `
     ($externalIdentity.version -eq $expectedPythonVersion -and $externalIdentity.bits -eq '64bit' -and $externalIdentity.implementation -eq 'cpython' -and -not $blockedExternalPath) `
     "External Python is not reusable standard CPython $expectedPythonVersion x64: $externalPython"
 
-$pythonRegistry = "HKCU:\Software\Python\PythonCore\$expectedPythonVersion\InstallPath"
-$pythonRegistryExisted = Test-Path -LiteralPath $pythonRegistry
-$savedDefault = $null
-$savedValues = @{}
-if ($pythonRegistryExisted) {
-    $savedDefault = (Get-Item -LiteralPath $pythonRegistry).GetValue('')
-    foreach ($property in (Get-ItemProperty -LiteralPath $pythonRegistry).PSObject.Properties) {
-        if (-not $property.Name.StartsWith('PS')) {
-            $savedValues[$property.Name] = $property.Value
-        }
-    }
-}
+$pythonRegistryRoot = 'HKCU:\Software\Python'
+$pythonCoreRegistry = Join-Path $pythonRegistryRoot 'PythonCore'
+$pythonRegistryRootExisted = Test-Path -LiteralPath $pythonRegistryRoot
+$pythonCoreRegistryExisted = Test-Path -LiteralPath $pythonCoreRegistry
+$pythonRegistryTag = Join-Path $pythonCoreRegistry ("3.13-e2e-{0}" -f [Guid]::NewGuid().ToString('N'))
+$pythonRegistry = Join-Path $pythonRegistryTag 'InstallPath'
+Test-E2ECondition (-not (Test-Path -LiteralPath $pythonRegistryTag)) 'The isolated PEP 514 test tag already exists.'
 try {
-    if (Test-Path -LiteralPath $pythonRegistry) {
-        Remove-Item -LiteralPath $pythonRegistry -Recurse -Force
-    }
     New-Item -Path $pythonRegistry -Force | Out-Null
+    New-ItemProperty -Path $pythonRegistryTag -Name DisplayName -Value 'Python Runtime Installer E2E CPython' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $pythonRegistryTag -Name Version -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $pythonRegistryTag -Name SysVersion -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $pythonRegistryTag -Name SysArchitecture -Value '64bit' -PropertyType String -Force | Out-Null
+    (Get-Item -LiteralPath $pythonRegistry).SetValue('', (Split-Path -Parent $externalPython), [Microsoft.Win32.RegistryValueKind]::String)
     New-ItemProperty -Path $pythonRegistry -Name ExecutablePath -Value $externalPython -PropertyType String -Force | Out-Null
     Invoke-Setup -Path $InstallerPath -Phase 'reuse_install' -Arguments $setupArguments | Out-Null
     $reuseManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -431,20 +451,28 @@ try {
     } finally {
         [System.IO.File]::Delete($reuseResultPath)
     }
-    $logsBeforeReuseUninstall = @(Get-ChildItem -LiteralPath $logRoot -Filter 'installer-*.log' -File | Select-Object -ExpandProperty FullName)
+    $logsBeforeReuseUninstall = @(Get-InstallerLogSnapshot)
+    $reuseLogPathsBefore = @($logsBeforeReuseUninstall | Select-Object -ExpandProperty FullName)
+    $reuseLogsGuaranteedRetained = @($logsBeforeReuseUninstall | Select-Object -First 19 -ExpandProperty FullName)
     $reuseUninstaller = Join-Path $appRoot 'unins000.exe'
     $evidence.commands['reuse_uninstall'] = "$([System.IO.Path]::GetFileName($reuseUninstaller)) /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
     $reuseUninstall = Start-Process -FilePath $reuseUninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
     $evidence.exit_codes['reuse_uninstall'] = $reuseUninstall.ExitCode
     Test-E2ECondition ($reuseUninstall.ExitCode -eq 0) 'Reused-runtime uninstall failed.'
     Test-E2ECondition (Test-Path -LiteralPath $externalPython -PathType Leaf) 'Reused CPython was removed by uninstall.'
+    $reuseUninstallLog = Get-NewInstallerLogPath -BeforePaths $reuseLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'reuse_uninstall'
+    $evidence.log_paths['reuse_uninstall'] = $reuseUninstallLog
     Test-E2ECondition ((Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash -eq $externalHash) 'Reused CPython was modified by uninstall.'
     Test-E2ECondition ((Get-Item -LiteralPath $externalPython).Length -eq $externalLength) 'Reused CPython size changed during uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath (Join-Path $appRoot 'venv'))) 'Managed environment survived reused-runtime uninstall.'
+    Test-E2ECondition (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) 'Installed manifest survived reused-runtime uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath $registryPath)) 'Discovery metadata survived reused-runtime uninstall.'
-    foreach ($retainedLog in $logsBeforeReuseUninstall) {
+    Test-E2ECondition (-not (Test-Path -LiteralPath $appRoot)) 'Application root survived reused-runtime uninstall.'
+    foreach ($retainedLog in $reuseLogsGuaranteedRetained) {
         Test-E2ECondition (Test-Path -LiteralPath $retainedLog -PathType Leaf) "Reuse uninstall removed retained log: $retainedLog"
     }
+    $logsAfterReuseUninstall = @(Get-InstallerLogSnapshot)
+    Test-E2ECondition ($logsAfterReuseUninstall.Count -le 20) 'Reused-runtime uninstall exceeded the newest-20 log retention bound.'
     Test-PathsUnchanged -ExpectedUserPath $userPathBefore -ExpectedMachinePath $machinePathBefore
     $evidence['reused_runtime'] = [ordered]@{
         path = $externalPython
@@ -453,28 +481,43 @@ try {
         sha256_before = $externalHash.ToLowerInvariant()
         sha256_after = (Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash.ToLowerInvariant()
         preserved = $true
+        registry_tag = $pythonRegistryTag
+        uninstall_log_path = $reuseUninstallLog
+        retained_log_count = $logsAfterReuseUninstall.Count
+        retained_prior_log_count = $reuseLogsGuaranteedRetained.Count
         verification_checks = @($reuseVerification.checks)
     }
 } finally {
-    if (Test-Path -LiteralPath $pythonRegistry) {
-        Remove-Item -LiteralPath $pythonRegistry -Recurse -Force
+    if (Test-Path -LiteralPath $pythonRegistryTag) {
+        Remove-Item -LiteralPath $pythonRegistryTag -Recurse -Force
     }
-    if ($pythonRegistryExisted) {
-        New-Item -Path $pythonRegistry -Force | Out-Null
-        if ($null -ne $savedDefault) {
-            (Get-Item -LiteralPath $pythonRegistry).SetValue('', $savedDefault)
-        }
-        foreach ($name in $savedValues.Keys) {
-            New-ItemProperty -Path $pythonRegistry -Name $name -Value $savedValues[$name] -Force | Out-Null
-        }
+    if (-not $pythonCoreRegistryExisted -and (Test-Path -LiteralPath $pythonCoreRegistry) -and @(Get-ChildItem -LiteralPath $pythonCoreRegistry).Count -eq 0) {
+        Remove-Item -LiteralPath $pythonCoreRegistry -Force
+    }
+    if (-not $pythonRegistryRootExisted -and (Test-Path -LiteralPath $pythonRegistryRoot) -and @(Get-ChildItem -LiteralPath $pythonRegistryRoot).Count -eq 0) {
+        Remove-Item -LiteralPath $pythonRegistryRoot -Force
     }
 }
 
+Test-E2ECondition (-not (Test-Path -LiteralPath $pythonRegistryTag)) 'Temporary PEP 514 test tag was not removed.'
+if (-not $pythonCoreRegistryExisted) {
+    Test-E2ECondition (-not (Test-Path -LiteralPath $pythonCoreRegistry)) 'Temporary PythonCore parent key was not restored.'
+}
+if (-not $pythonRegistryRootExisted) {
+    Test-E2ECondition (-not (Test-Path -LiteralPath $pythonRegistryRoot)) 'Temporary Python registry root was not restored.'
+}
+$evidence['reused_runtime']['registry_restored'] = $true
+
 $technicalLogs = @(Get-ChildItem -LiteralPath $logRoot -Filter 'installer-*.log' -File | Sort-Object LastWriteTimeUtc)
 Test-E2ECondition ($technicalLogs.Count -gt 0) 'Retained installer logs are missing.'
+Test-E2ECondition ($technicalLogs.Count -le 20) 'Technical log retention exceeded the newest-20 policy.'
 Test-E2ECondition (Test-Path -LiteralPath $setupLog -PathType Leaf) 'Inno Setup log is missing.'
+$currentRunTechnicalLogs = @($evidence.log_paths.Values |
+        Sort-Object -Unique |
+        ForEach-Object { Get-Item -LiteralPath ([string]$_) })
+Test-E2ECondition ($currentRunTechnicalLogs.Count -eq $evidence.log_paths.Count) 'One or more phase logs are missing.'
 $verificationBeforeCompletion = $false
-foreach ($technicalLog in $technicalLogs) {
+foreach ($technicalLog in $currentRunTechnicalLogs) {
     $logText = Get-Content -LiteralPath $technicalLog.FullName -Raw -Encoding UTF8
     Test-E2ECondition (-not $logText.Contains($secretSentinel)) "Sensitive sentinel leaked to log: $($technicalLog.FullName)"
     Test-E2ECondition ($logText -notmatch 'gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----') "Credential pattern found in log: $($technicalLog.FullName)"
@@ -492,7 +535,10 @@ Test-E2ECondition $verificationBeforeCompletion 'No log proves final verificatio
 $evidence['logs'] = [ordered]@{
     setup_log = $setupLog
     technical_logs = @($technicalLogs | Select-Object -ExpandProperty FullName)
+    scanned_phase_logs = @($currentRunTechnicalLogs | Select-Object -ExpandProperty FullName)
+    phase_paths = $evidence.log_paths
     retained_count = $technicalLogs.Count
+    retention_bound = 20
     english_only = $true
     sensitive_value_scan = 'passed'
     verification_before_completion = $verificationBeforeCompletion

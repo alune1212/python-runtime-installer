@@ -48,13 +48,37 @@ function Get-InstallerLogPath {
 
 function ConvertTo-ProcessArgument {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
-    if ($Value.Contains('"')) {
-        throw 'Process arguments containing quote characters are not supported.'
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
     }
-    if ($Value.Length -eq 0 -or $Value -match '[\s&()\[\]{}^=;!''+,`]') {
-        return '"' + $Value + '"'
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashCount += 1
+            continue
+        }
+        if ($character -eq [char]34) {
+            if ($backslashCount -gt 0) {
+                [void]$builder.Append(([string][char]92) * ($backslashCount * 2))
+            }
+            [void]$builder.Append('\"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append(([string][char]92) * $backslashCount)
+            $backslashCount = 0
+        }
+        [void]$builder.Append($character)
     }
-    return $Value
+    if ($backslashCount -gt 0) {
+        [void]$builder.Append(([string][char]92) * ($backslashCount * 2))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
 }
 
 function Invoke-LoggedProcess {
@@ -213,21 +237,41 @@ function Test-CompatiblePython {
     }
 }
 
-function Get-PythonCandidate {
+function Get-RegisteredPythonCandidate {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$ExpectedVersion)
-
-    $candidates = New-Object System.Collections.Generic.List[string]
-    $registryRoots = @(
-        "HKCU:\Software\Python\PythonCore\$ExpectedVersion\InstallPath",
-        "HKLM:\Software\Python\PythonCore\$ExpectedVersion\InstallPath",
-        "HKLM:\Software\WOW6432Node\Python\PythonCore\$ExpectedVersion\InstallPath"
+    param(
+        [Parameter(Mandatory = $true)][string]$RegistryBase,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion
     )
-    foreach ($registryRoot in $registryRoots) {
-        if (Test-Path -LiteralPath $registryRoot) {
-            $item = Get-ItemProperty -LiteralPath $registryRoot
-            $installPath = (Get-Item -LiteralPath $registryRoot).GetValue('')
-            $executableProperty = $item.PSObject.Properties['ExecutablePath']
+
+    $registeredCandidates = @()
+    if (-not (Test-Path -LiteralPath $RegistryBase)) {
+        return @()
+    }
+    $expectedMajorMinor = ([Version]$ExpectedVersion).ToString(2)
+    foreach ($tagKey in @(Get-ChildItem -LiteralPath $RegistryBase -ErrorAction SilentlyContinue)) {
+        $isExactRegistration = $false
+        try {
+            $tagProperties = Get-ItemProperty -LiteralPath $tagKey.PSPath -ErrorAction Stop
+            $sysVersionProperty = $tagProperties.PSObject.Properties['SysVersion']
+            if ($sysVersionProperty -and $sysVersionProperty.Value) {
+                $registeredVersion = [string]$sysVersionProperty.Value
+                if ($registeredVersion -eq $ExpectedVersion) {
+                    $isExactRegistration = $true
+                } elseif ($registeredVersion -ne $expectedMajorMinor) {
+                    continue
+                }
+            }
+            $installPathKey = Join-Path $tagKey.PSPath 'InstallPath'
+            if (-not (Test-Path -LiteralPath $installPathKey)) {
+                continue
+            }
+            $installProperties = Get-ItemProperty -LiteralPath $installPathKey -ErrorAction Stop
+            $executableProperty = $installProperties.PSObject.Properties['ExecutablePath']
+            $installPath = $null
+            if (-not ($executableProperty -and $executableProperty.Value)) {
+                $installPath = (Get-Item -LiteralPath $installPathKey -ErrorAction Stop).GetValue('')
+            }
             $candidate = if ($executableProperty -and $executableProperty.Value) {
                 $executableProperty.Value
             } elseif ($installPath) {
@@ -236,8 +280,28 @@ function Get-PythonCandidate {
                 $null
             }
             if ($candidate) {
-                $candidates.Add([string]$candidate)
+                $registeredCandidates += [PSCustomObject]@{ Path = [string]$candidate; Exact = $isExactRegistration }
             }
+        } catch {
+            Write-InstallerLog -Stage 'python-discovery' -Level 'WARN' -Message ("Registry candidate ignored: {0}; {1}" -f $tagKey.PSPath, $_.Exception.Message)
+        }
+    }
+    return @($registeredCandidates | Sort-Object Exact -Descending | Select-Object -ExpandProperty Path -Unique)
+}
+
+function Get-PythonCandidate {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ExpectedVersion)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $registryBases = @(
+        'HKCU:\Software\Python\PythonCore',
+        'HKLM:\Software\Python\PythonCore',
+        'HKLM:\Software\WOW6432Node\Python\PythonCore'
+    )
+    foreach ($registryBase in $registryBases) {
+        foreach ($candidate in @(Get-RegisteredPythonCandidate -RegistryBase $registryBase -ExpectedVersion $ExpectedVersion)) {
+            $candidates.Add($candidate)
         }
     }
     $launcher = Get-Command 'py.exe' -ErrorAction SilentlyContinue
@@ -441,7 +505,7 @@ function Update-VenvActivationPath {
     }
 }
 
-function Publish-DiscoveryMetadata {
+function Publish-DiscoveryRegistration {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$RegistryPath,
@@ -483,13 +547,13 @@ function Get-DiscoveryMetadataSnapshot {
     return [PSCustomObject]@{ Exists = $true; Values = $values }
 }
 
-function Restore-DiscoveryMetadata {
+function Restore-DiscoveryRegistration {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$RegistryPath,
         [Parameter(Mandatory = $true)]$Snapshot
     )
-    Remove-DiscoveryMetadata -RegistryPath $RegistryPath
+    Remove-DiscoveryRegistration -RegistryPath $RegistryPath
     if (-not $Snapshot.Exists) {
         return
     }
@@ -500,7 +564,7 @@ function Restore-DiscoveryMetadata {
     }
 }
 
-function Remove-DiscoveryMetadata {
+function Remove-DiscoveryRegistration {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$RegistryPath)
     $key = "HKCU:\$RegistryPath"
@@ -542,9 +606,9 @@ Export-ModuleMember -Function @(
     'Test-PayloadManifest',
     'Compare-InstallerVersion',
     'Update-VenvActivationPath',
-    'Publish-DiscoveryMetadata',
+    'Publish-DiscoveryRegistration',
     'Get-DiscoveryMetadataSnapshot',
-    'Restore-DiscoveryMetadata',
-    'Remove-DiscoveryMetadata',
+    'Restore-DiscoveryRegistration',
+    'Remove-DiscoveryRegistration',
     'Remove-OwnedDirectory'
 )

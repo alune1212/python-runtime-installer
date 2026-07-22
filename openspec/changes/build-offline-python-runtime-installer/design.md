@@ -130,7 +130,7 @@ The CI design has three entry points:
 - `build-installer.yml`: manual dispatch and matching semantic-version tags; prepares payload, audits it, compiles Inno Setup, executes end-to-end installer tests, optionally signs, and uploads or releases artifacts.
 - `dependency-update.yml`: monthly and manual lock refresh on Windows followed by the same gates and a pull request; no auto-merge or release.
 
-The end-to-end test uses a test-only setup switch to force the bundled-runtime branch, then verifies install, manifest, smoke-test result, same-version repair, uninstall ownership, retained logs, and Unicode/space path contracts. Detection/reuse logic also receives focused tests using controlled candidate shims. The test switch changes runtime selection only; it cannot alter requirements or payload content.
+The end-to-end test uses one test-only setup switch to force the bundled-runtime branch and a separate fault-injection switch that stops only after a complete staging verification and before promotion. It then verifies install, manifest, smoke-test result, idempotent same-version rerun, drift repair, failed-staging isolation, uninstall ownership, retained logs, and Unicode/space path contracts. Detection/reuse logic also receives focused tests using an isolated PEP 514 registration. Neither test switch can alter requirements, payload content, or verification rules.
 
 GitHub's runner is not treated as evidence for desktop compatibility. Promotion to `1.0.0` requires a checked-in acceptance record from real Windows 10 x64 and Windows 11 x64 machines.
 

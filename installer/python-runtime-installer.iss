@@ -255,6 +255,8 @@ begin
     '-StatusPath "' + StatusPath + '"';
   if HasCommandLineSwitch('/FORCEBUNDLED') then
     Parameters := Parameters + ' -ForceBundled';
+  if HasCommandLineSwitch('/E2EFAILAFTERSTAGING') then
+    Parameters := Parameters + ' -TestFailAfterStagingVerification';
 
   if not Exec(
     ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),

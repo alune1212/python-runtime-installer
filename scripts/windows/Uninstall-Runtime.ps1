@@ -33,7 +33,10 @@ try {
             Remove-OwnedDirectory -AppRoot $AppRoot -Path $runtimeRoot
         }
     }
-    Remove-DiscoveryMetadata -RegistryPath ([string]$config.product.registry_path)
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        Remove-Item -LiteralPath $manifestPath -Force
+    }
+    Remove-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path)
     Write-InstallerLog -Stage 'complete' -Message 'Managed runtime uninstall completed; retained logs were preserved.'
     exit 0
 } catch {

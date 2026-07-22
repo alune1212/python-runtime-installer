@@ -20,7 +20,7 @@ def test_target_install_is_offline_hash_checked_and_transactional() -> None:
         "'.staging\\'",
         "'.previous-'",
         "Move-Item -LiteralPath $stageVenv -Destination $activeRoot",
-        "Publish-DiscoveryMetadata",
+        "Publish-DiscoveryRegistration",
         "Downgrade blocked",
     ):
         assert required in script
@@ -78,16 +78,24 @@ def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
 def test_lifecycle_script_contains_rollback_and_ownership_guards() -> None:
     install = read("scripts/windows/Install-Runtime.ps1")
     uninstall = read("scripts/windows/Uninstall-Runtime.ps1")
+    runtime = read("scripts/windows/RuntimeInstaller.psm1")
     assert "previousManifestPath" in install
     assert "Get-DiscoveryMetadataSnapshot" in install
-    assert "Restore-DiscoveryMetadata" in install
+    assert "Restore-DiscoveryRegistration" in install
     assert "runtime_ownership = $runtimeOwnership" in install
     assert "runtime_ownership -eq 'private'" in uninstall
+    assert "Remove-Item -LiteralPath $manifestPath -Force" in uninstall
     assert "retained logs were preserved" in uninstall
     assert "Move-Item -LiteralPath $previousRoot -Destination" in install
     assert "$activationCommitted = $true" in install
     assert "Write-InstallStatus -Value 'downgrade-blocked'" in install
     assert "exit 21" in install
+    assert "$previousManifestPath = $manifestBackupPath" in install
+    assert "$manifestPublished = $true" in install
+    assert "TestFailAfterStagingVerification" in install
+    assert "Get-RegisteredPythonCandidate" in runtime
+    assert "HKCU:\\Software\\Python\\PythonCore" in runtime
+    assert "$ExpectedVersion\\InstallPath" not in runtime
 
 
 def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
@@ -95,6 +103,7 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
     for required in (
         "/FORCEBUNDLED",
         "healthyManifestHash",
+        "/E2EFAILAFTERSTAGING",
         "custom_drift-1.0.dist-info",
         "runtime_ownership -eq 'reused'",
         "Reused CPython was removed by uninstall",
@@ -103,6 +112,19 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "Test-PathsUnchanged",
         "verification_checks",
         "private_python_removed",
+        "manifest_removed",
+        "application_root_removed",
+        "manifest_preserved",
+        "staging_verified",
+        "registry_tag",
+        "registry_restored",
+        "Get-NewInstallerLogPath",
+        "log_paths",
+        "Select-Object -First 19",
+        "retention_bound = 20",
+        "scanned_phase_logs",
+        "3.13-e2e-",
+        "SysVersion",
     ):
         assert required in test_script
 
