@@ -65,16 +65,31 @@ uv sync --frozen
 在 Windows Runner 上复现主要构建步骤：
 
 ```powershell
-uv sync --frozen
+$managedPythonKey = 'cpython-3.13.14-windows-x86_64-none'
+$temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$managedPythonRoot = Join-Path $temporaryRoot 'python-runtime-installer-build-python'
+$env:UV_PYTHON_INSTALL_DIR = $managedPythonRoot
+uv python install --no-registry --no-bin $managedPythonKey
+$buildPython = @(
+    uv --directory $temporaryRoot python find `
+        --no-project `
+        --managed-python `
+        --no-python-downloads `
+        --resolve-links `
+        $managedPythonKey
+) -join ''
+uv sync --frozen --python $buildPython
 uv run python -m scripts.build.audit_dependencies
 Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
 Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
 Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings config/PSScriptAnalyzerSettings.psd1
 Invoke-Pester -Path tests/powershell -CI -Output Detailed
-.\scripts\build\Prepare-Payload.ps1 -PythonExecutable python
+.\scripts\build\Prepare-Payload.ps1 -PythonExecutable $buildPython
 $compiler = .\scripts\build\Install-InnoSetup.ps1
 .\scripts\build\Compile-Installer.ps1 -InnoCompiler $compiler -BuildCommit local
-.\scripts\build\Test-Installer.ps1 -InstallerPath .\installer\output\python-runtime-installer-0.1.0-windows-x64-unsigned.exe
+.\scripts\build\Test-Installer.ps1 `
+    -InstallerPath .\installer\output\python-runtime-installer-0.1.0-windows-x64-unsigned.exe `
+    -ReusablePythonPath $buildPython
 .\scripts\build\Finalize-Release.ps1
 ```
 

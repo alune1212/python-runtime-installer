@@ -18,44 +18,141 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - name: Install exact target Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
-        with:
-          python-version: "3.13.14"
-          architecture: x64
       - name: Install pinned uv
         uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
         with:
           version: "0.11.29"
           enable-cache: true
+      - name: Install isolated exact target Python
+        shell: powershell
+        run: |
+          $expectedPythonVersion = (Get-Content config/product.json -Raw | ConvertFrom-Json).target.python.version
+          $managedPythonKey = "cpython-$expectedPythonVersion-windows-x86_64-none"
+          $managedPythonRoot = Join-Path $env:RUNNER_TEMP 'python-runtime-installer-build-python'
+          $env:UV_PYTHON_INSTALL_DIR = $managedPythonRoot
+
+          uv python install --no-registry --no-bin $managedPythonKey
+          if ($LASTEXITCODE -ne 0) {
+            throw 'UV failed to install the exact isolated CPython runtime.'
+          }
+
+          $pythonFindOutput = @(
+            uv --directory $env:RUNNER_TEMP python find `
+              --no-project `
+              --managed-python `
+              --no-python-downloads `
+              --resolve-links `
+              $managedPythonKey
+          )
+          $pythonFindExitCode = $LASTEXITCODE
+          if ($pythonFindExitCode -ne 0 -or $pythonFindOutput.Count -ne 1) {
+            throw 'UV did not resolve exactly one isolated managed CPython interpreter.'
+          }
+
+          $pythonExecutable = (Resolve-Path -LiteralPath ([string]$pythonFindOutput[0])).Path
+          $managedPythonPrefix = [IO.Path]::GetFullPath($managedPythonRoot).TrimEnd('\') + '\'
+          if (-not $pythonExecutable.StartsWith($managedPythonPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "UV resolved Python outside the isolated managed root: $pythonExecutable"
+          }
+
+          $identityText = @(
+            & $pythonExecutable -I -B -c 'import json,os,platform,struct,sys; print(json.dumps(dict(version=platform.python_version(), implementation=sys.implementation.name, bits=struct.calcsize(''P'') * 8, machine=platform.machine(), executable=os.path.realpath(sys.executable), is_virtual_environment=sys.prefix != sys.base_prefix)))'
+          ) -join ''
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The isolated managed Python identity probe failed.'
+          }
+          $identity = $identityText | ConvertFrom-Json
+          if (
+            $identity.version -ne $expectedPythonVersion -or
+            $identity.implementation -ne 'cpython' -or
+            [int]$identity.bits -ne 64 -or
+            $identity.machine -ne 'AMD64' -or
+            [bool]$identity.is_virtual_environment -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              [IO.Path]::GetFullPath([string]$identity.executable),
+              $pythonExecutable
+            )
+          ) {
+            throw "Unexpected isolated managed Python identity: $identityText"
+          }
+
+          & $pythonExecutable -I -B -c 'import ensurepip,ssl,venv'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The isolated managed Python health imports failed.'
+          }
+          & $pythonExecutable -I -B -m pip --version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The isolated managed Python does not provide pip.'
+          }
+
+          @(
+            "PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON=$pythonExecutable"
+            "UV_PYTHON=$pythonExecutable"
+            "UV_PYTHON_INSTALL_DIR=$managedPythonRoot"
+            'UV_PYTHON_DOWNLOADS=never'
+            'UV_MANAGED_PYTHON=true'
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Refresh immutable locks
         shell: powershell
         env:
           PIP_INDEX_URL: https://pypi.org/simple
         run: |
-          uv sync --frozen
+          function Confirm-NativeExitCode {
+            param([string]$Label)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Label failed with exit code $LASTEXITCODE."
+            }
+          }
+
+          uv sync --frozen --python $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON
+          Confirm-NativeExitCode 'initial uv sync --frozen'
           uv run python -m scripts.build.lock_requirements --upgrade
+          Confirm-NativeExitCode 'lock_requirements --upgrade'
           uv lock --upgrade
-          uv sync --frozen
+          Confirm-NativeExitCode 'uv lock --upgrade'
+          uv sync --frozen --python $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON
+          Confirm-NativeExitCode 'updated uv sync --frozen'
       - name: Run static and security gates
         shell: powershell
         env:
           PIP_INDEX_URL: https://pypi.org/simple
         run: |
+          function Confirm-NativeExitCode {
+            param([string]$Label)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Label failed with exit code $LASTEXITCODE."
+            }
+          }
+
           uv run python -m scripts.build.validate_config
+          Confirm-NativeExitCode 'validate_config'
           uv run python -m scripts.build.validate_vulnerability_exceptions
+          Confirm-NativeExitCode 'validate_vulnerability_exceptions'
           uv run python -m scripts.build.validate_desktop_acceptance
+          Confirm-NativeExitCode 'validate_desktop_acceptance'
           uv run python -m scripts.build.audit_dependencies
+          Confirm-NativeExitCode 'audit_dependencies'
           uv run ruff format --check .
+          Confirm-NativeExitCode 'ruff format --check'
           uv run ruff check .
+          Confirm-NativeExitCode 'ruff check'
           uv run pytest
+          Confirm-NativeExitCode 'pytest'
           uv run python -m scripts.build.scan_repository
+          Confirm-NativeExitCode 'scan_repository'
           git diff --check
+          Confirm-NativeExitCode 'git diff --check'
       - name: Validate OpenSpec strictly
         shell: powershell
         run: |
           npm install --global @fission-ai/openspec@1.6.0
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Installing the pinned OpenSpec CLI failed.'
+          }
           openspec validate --all --strict
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Strict OpenSpec validation failed.'
+          }
       - name: Run PowerShell and full installer gates
         shell: powershell
         env:
@@ -67,16 +164,22 @@ jobs:
           $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings config/PSScriptAnalyzerSettings.psd1
           if ($findings) { $findings | Format-Table -AutoSize; throw 'PSScriptAnalyzer failed.' }
           Invoke-Pester -Path tests/powershell -CI -Output Detailed
-          ./scripts/build/Prepare-Payload.ps1 -PythonExecutable python
+          ./scripts/build/Prepare-Payload.ps1 -PythonExecutable $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON
           $compiler = ./scripts/build/Install-InnoSetup.ps1
           ./scripts/build/Compile-Installer.ps1 -InnoCompiler $compiler -BuildCommit $env:GITHUB_SHA
           $version = (Get-Content config/product.json -Raw | ConvertFrom-Json).product.version
-          ./scripts/build/Test-Installer.ps1 -InstallerPath "installer/output/python-runtime-installer-$version-windows-x64-unsigned.exe"
+          ./scripts/build/Test-Installer.ps1 `
+            -InstallerPath "installer/output/python-runtime-installer-$version-windows-x64-unsigned.exe" `
+            -ReusablePythonPath $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON
       - name: Detect unchanged refresh
         id: changes
         shell: powershell
         run: |
-          $changed = -not [string]::IsNullOrWhiteSpace((git status --short -- requirements.txt bootstrap-requirements.txt uv.lock))
+          $statusOutput = git status --short -- requirements.txt bootstrap-requirements.txt uv.lock
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Detecting refreshed dependency files failed.'
+          }
+          $changed = -not [string]::IsNullOrWhiteSpace($statusOutput)
           "changed=$($changed.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           if (-not $changed) { Write-Host 'No compatible dependency updates were found.' }
       - name: Create or update review-only pull request
@@ -85,17 +188,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          function Confirm-NativeExitCode {
+            param([string]$Label)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Label failed with exit code $LASTEXITCODE."
+            }
+          }
+
           $branch = 'automation/monthly-dependency-refresh'
           git config user.name 'github-actions[bot]'
+          Confirm-NativeExitCode 'configuring the Git author name'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin "${branch}:refs/remotes/origin/${branch}" 2>$null
+          Confirm-NativeExitCode 'configuring the Git author email'
+
+          git ls-remote --exit-code --heads origin "refs/heads/$branch"
+          $lsRemoteExitCode = $LASTEXITCODE
+          if ($lsRemoteExitCode -eq 0) {
+            git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+            Confirm-NativeExitCode 'fetching the existing dependency refresh branch'
+          } elseif ($lsRemoteExitCode -eq 2) {
+            Write-Host 'The dependency refresh branch does not exist yet.'
+          } else {
+            throw "Checking the dependency refresh branch failed with exit code $lsRemoteExitCode."
+          }
+
           git switch -C $branch
+          Confirm-NativeExitCode 'switching to the dependency refresh branch'
           git add requirements.txt bootstrap-requirements.txt uv.lock
+          Confirm-NativeExitCode 'staging refreshed dependency files'
           git commit -m 'chore(deps): refresh locked dependencies'
+          Confirm-NativeExitCode 'committing refreshed dependency files'
           git push --force-with-lease origin $branch
+          Confirm-NativeExitCode 'pushing the dependency refresh branch'
           $existing = gh pr list --head $branch --state open --json number --jq '.[0].number'
+          Confirm-NativeExitCode 'querying the dependency refresh pull request'
           if ($existing) {
             gh pr edit $existing --title 'chore(deps): monthly locked dependency refresh' --body-file docs/dependency-refresh-pr.md
           } else {
             gh pr create --base main --head $branch --title 'chore(deps): monthly locked dependency refresh' --body-file docs/dependency-refresh-pr.md
           }
+          Confirm-NativeExitCode 'creating or updating the dependency refresh pull request'

@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
+    [string]$ReusablePythonPath = '',
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EvidencePath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($ReusablePythonPath)) {
+    throw 'ReusablePythonPath is required; implicit Python discovery is not allowed.'
+}
 
 $config = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'config\product.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
@@ -88,6 +93,100 @@ function Test-E2ECondition([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Get-ReusablePythonSnapshot(
+    [string]$Path,
+    [string]$ExpectedVersion,
+    [string]$InstallerOwnedRoot
+) {
+    $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+    Test-E2ECondition ($resolvedPath.Provider.Name -eq 'FileSystem') 'Reusable Python must use the FileSystem provider.'
+    $canonicalPath = [IO.Path]::GetFullPath($resolvedPath.Path)
+    Test-E2ECondition (Test-Path -LiteralPath $canonicalPath -PathType Leaf) "Reusable Python is missing: $canonicalPath"
+    Test-E2ECondition (
+        [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFileName($canonicalPath), 'python.exe')
+    ) "Reusable Python must be a python.exe file: $canonicalPath"
+
+    $ownedRoot = [IO.Path]::GetFullPath($InstallerOwnedRoot).TrimEnd('\')
+    $ownedPrefix = $ownedRoot + '\'
+    $insideOwnedRoot = (
+        [StringComparer]::OrdinalIgnoreCase.Equals($canonicalPath, $ownedRoot) -or
+        $canonicalPath.StartsWith($ownedPrefix, [StringComparison]::OrdinalIgnoreCase)
+    )
+    Test-E2ECondition (-not $insideOwnedRoot) "Reusable Python is inside the installer-owned root: $canonicalPath"
+    $blockedPath = $canonicalPath -match '(?i)[\\/](windowsapps|anaconda|miniconda|conda|embedded)(?:[\\/]|$)'
+    Test-E2ECondition (-not $blockedPath) "Reusable Python uses a blocked distribution path: $canonicalPath"
+
+    $probeText = @(
+        & $canonicalPath -I -B -c 'import json,os,platform,struct,sys; print(json.dumps(dict(version=platform.python_version(), implementation=sys.implementation.name, bits=struct.calcsize(''P'') * 8, machine=platform.machine(), executable=os.path.realpath(sys.executable), prefix=os.path.realpath(sys.prefix), base_prefix=os.path.realpath(sys.base_prefix), is_virtual_environment=sys.prefix != sys.base_prefix)))'
+    ) -join ''
+    $probeExitCode = $LASTEXITCODE
+    Test-E2ECondition ($probeExitCode -eq 0) "Reusable Python identity probe failed: $canonicalPath"
+    $identity = $probeText | ConvertFrom-Json
+    $reportedExecutable = [IO.Path]::GetFullPath([string]$identity.executable)
+
+    Test-E2ECondition ($identity.version -eq $ExpectedVersion) "Reusable Python version is not $ExpectedVersion."
+    Test-E2ECondition ($identity.implementation -eq 'cpython') 'Reusable Python implementation is not CPython.'
+    Test-E2ECondition ([int]$identity.bits -eq 64) 'Reusable Python is not 64-bit.'
+    Test-E2ECondition ($identity.machine -eq 'AMD64') 'Reusable Python machine is not AMD64.'
+    Test-E2ECondition (
+        [StringComparer]::OrdinalIgnoreCase.Equals($reportedExecutable, $canonicalPath)
+    ) 'Reusable Python reported a different executable path.'
+    Test-E2ECondition (
+        -not [bool]$identity.is_virtual_environment -and
+        [StringComparer]::OrdinalIgnoreCase.Equals([string]$identity.prefix, [string]$identity.base_prefix)
+    ) 'Reusable Python must be a base interpreter, not a virtual environment.'
+
+    $pythonFile = Get-Item -LiteralPath $canonicalPath
+    return [pscustomobject][ordered]@{
+        path = $canonicalPath
+        version = [string]$identity.version
+        architecture = ('{0}bit' -f [int]$identity.bits)
+        bits = [int]$identity.bits
+        machine = [string]$identity.machine
+        implementation = [string]$identity.implementation
+        executable = $reportedExecutable
+        prefix = [string]$identity.prefix
+        base_prefix = [string]$identity.base_prefix
+        is_virtual_environment = [bool]$identity.is_virtual_environment
+        sha256 = (Get-FileHash -LiteralPath $canonicalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        length = [Int64]$pythonFile.Length
+    }
+}
+
+function Test-ReusablePythonUnchanged(
+    [string]$Path,
+    $Baseline,
+    [string]$ExpectedVersion,
+    [string]$InstallerOwnedRoot,
+    [string]$Phase
+) {
+    try {
+        $current = Get-ReusablePythonSnapshot `
+            -Path $Path `
+            -ExpectedVersion $ExpectedVersion `
+            -InstallerOwnedRoot $InstallerOwnedRoot
+    } catch {
+        throw "Reusable Python validation failed after $($Phase): $($_.Exception.Message)"
+    }
+
+    Test-E2ECondition (
+        [StringComparer]::OrdinalIgnoreCase.Equals([string]$current.path, [string]$Baseline.path)
+    ) "Reusable Python path changed after $Phase."
+    Test-E2ECondition ([Int64]$current.length -eq [Int64]$Baseline.length) "Reusable Python size changed after $Phase."
+    Test-E2ECondition ($current.sha256 -eq $Baseline.sha256) "Reusable Python content changed after $Phase."
+    Test-E2ECondition (
+        $current.version -eq $Baseline.version -and
+        $current.bits -eq $Baseline.bits -and
+        $current.machine -eq $Baseline.machine -and
+        $current.implementation -eq $Baseline.implementation -and
+        [StringComparer]::OrdinalIgnoreCase.Equals([string]$current.executable, [string]$Baseline.executable) -and
+        [StringComparer]::OrdinalIgnoreCase.Equals([string]$current.prefix, [string]$Baseline.prefix) -and
+        [StringComparer]::OrdinalIgnoreCase.Equals([string]$current.base_prefix, [string]$Baseline.base_prefix) -and
+        $current.is_virtual_environment -eq $Baseline.is_virtual_environment
+    ) "Reusable Python identity changed after $Phase."
+    return $current
 }
 
 function Get-InstallerLogSnapshot {
@@ -211,6 +310,27 @@ if ($InstallerPath.EndsWith('-unsigned.exe', [StringComparison]::OrdinalIgnoreCa
     Test-E2ECondition ($installerSignature.Status -eq 'NotSigned') 'Unsigned-named installer unexpectedly has a non-NotSigned status.'
 } else {
     Test-E2ECondition ($installerSignature.Status -eq 'Valid') 'Signed-named installer does not have a valid Authenticode signature.'
+}
+
+$reusablePythonBaseline = Get-ReusablePythonSnapshot `
+    -Path $ReusablePythonPath `
+    -ExpectedVersion $expectedPythonVersion `
+    -InstallerOwnedRoot $appRoot
+$ReusablePythonPath = [string]$reusablePythonBaseline.path
+$evidence['reusable_python_baseline'] = [ordered]@{
+    path = $ReusablePythonPath
+    version = [string]$reusablePythonBaseline.version
+    architecture = [string]$reusablePythonBaseline.architecture
+    bits = [int]$reusablePythonBaseline.bits
+    machine = [string]$reusablePythonBaseline.machine
+    implementation = [string]$reusablePythonBaseline.implementation
+    executable = [string]$reusablePythonBaseline.executable
+    prefix = [string]$reusablePythonBaseline.prefix
+    base_prefix = [string]$reusablePythonBaseline.base_prefix
+    is_virtual_environment = [bool]$reusablePythonBaseline.is_virtual_environment
+    sha256 = [string]$reusablePythonBaseline.sha256
+    length = [Int64]$reusablePythonBaseline.length
+    captured_before_install = $true
 }
 
 $setupArguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ("/LOG={0}" -f $setupLog))
@@ -391,12 +511,16 @@ $healthyPythonHash = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).H
 $stagingParent = Join-Path $appRoot '.staging'
 $failedExitCode = Invoke-Setup -Path $InstallerPath -Phase 'failed_staging' -AllowedExitCodes @(20) -Arguments ($setupArguments + '/E2EFAILAFTERSTAGING')
 Test-E2ECondition ($failedExitCode -eq 20) 'The staging failure returned an unexpected exit code.'
-Test-E2ECondition ((Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash -eq $healthyPythonHash) 'Failed staging replaced active Python.'
-Test-E2ECondition ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -eq $healthyManifestHashBeforeFailure) 'Failed staging replaced the healthy manifest.'
+$activePythonHashAfterFailure = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash
+$activeManifestHashAfterFailure = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+Test-E2ECondition ($activePythonHashAfterFailure -eq $healthyPythonHash) 'Failed staging replaced active Python.'
+Test-E2ECondition ($activeManifestHashAfterFailure -eq $healthyManifestHashBeforeFailure) 'Failed staging replaced the healthy manifest.'
 $stagingEntries = @(Get-ChildItem -LiteralPath $stagingParent -Force -ErrorAction SilentlyContinue)
-Test-E2ECondition ($stagingEntries.Count -eq 0) 'Failed staging content was not cleaned.'
+$stagingCleaned = $stagingEntries.Count -eq 0
+Test-E2ECondition $stagingCleaned 'Failed staging content was not cleaned.'
 $previousEntries = @(Get-ChildItem -LiteralPath $appRoot -Directory -Filter '.previous-*' -ErrorAction SilentlyContinue)
-Test-E2ECondition ($previousEntries.Count -eq 0) 'Failed staging created a previous active environment.'
+$previousEnvironmentAbsent = $previousEntries.Count -eq 0
+Test-E2ECondition $previousEnvironmentAbsent 'Failed staging created a previous active environment.'
 Test-RegistryValueSet -Expected $expectedDiscovery
 $failedStagingLog = Get-Item -LiteralPath ([string]$evidence.log_paths['failed_staging'])
 $failedStagingLogText = Get-Content -LiteralPath $failedStagingLog.FullName -Raw -Encoding UTF8
@@ -411,10 +535,14 @@ try {
 $evidence['failed_staging'] = [ordered]@{
     exit_code = $failedExitCode
     active_python_sha256_before = $healthyPythonHash.ToLowerInvariant()
-    active_python_sha256_after = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    manifest_preserved = ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -eq $healthyManifestHashBeforeFailure)
+    active_python_sha256_after = $activePythonHashAfterFailure.ToLowerInvariant()
+    manifest_sha256_before = $healthyManifestHashBeforeFailure.ToLowerInvariant()
+    manifest_sha256_after = $activeManifestHashAfterFailure.ToLowerInvariant()
+    manifest_preserved = ($activeManifestHashAfterFailure -eq $healthyManifestHashBeforeFailure)
     discovery_preserved = $true
     staging_verified = $true
+    staging_cleaned = $stagingCleaned
+    previous_environment_absent = $previousEnvironmentAbsent
     log_path = $failedStagingLog.FullName
     verification_checks = @($recoveryVerification.checks)
 }
@@ -431,6 +559,12 @@ $evidence.exit_codes['private_uninstall'] = $privateUninstall.ExitCode
 $privateUninstallLog = Get-NewInstallerLogPath -BeforePaths $privateLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'private_uninstall'
 $evidence.log_paths['private_uninstall'] = $privateUninstallLog
 Test-E2ECondition ($privateUninstall.ExitCode -eq 0) 'Private-runtime uninstall failed.'
+$reusablePythonAfterPrivateUninstall = Test-ReusablePythonUnchanged `
+    -Path $ReusablePythonPath `
+    -Baseline $reusablePythonBaseline `
+    -ExpectedVersion $expectedPythonVersion `
+    -InstallerOwnedRoot $appRoot `
+    -Phase 'private_uninstall'
 Test-E2ECondition (-not (Test-Path -LiteralPath (Join-Path $appRoot 'venv'))) 'Managed environment survived uninstall.'
 Test-E2ECondition (-not (Test-Path -LiteralPath $privatePythonPath -PathType Leaf)) 'Private CPython survived uninstall.'
 Test-E2ECondition (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) 'Installed manifest survived uninstall.'
@@ -453,18 +587,10 @@ $evidence['private_uninstall'] = [ordered]@{
     log_path = $privateUninstallLog
     retained_log_count = $logsAfterPrivateUninstall.Count
     retained_prior_log_count = $privateLogsGuaranteedRetained.Count
+    reusable_python_sha256_after = [string]$reusablePythonAfterPrivateUninstall.sha256
+    reusable_python_length_after = [Int64]$reusablePythonAfterPrivateUninstall.length
+    reusable_python_preserved = $true
 }
-
-$externalPython = (Get-Command python.exe -ErrorAction Stop).Source
-$externalHash = (Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash
-$externalLength = (Get-Item -LiteralPath $externalPython).Length
-$externalProbeText = & $externalPython -I -c 'import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),bits=platform.architecture()[0],implementation=sys.implementation.name)))'
-Test-E2ECondition ($LASTEXITCODE -eq 0) 'Controlled external Python probe failed.'
-$externalIdentity = $externalProbeText | ConvertFrom-Json
-$blockedExternalPath = $externalPython.ToLowerInvariant() -match '\\(windowsapps|anaconda|miniconda|conda|embedded)\\'
-Test-E2ECondition `
-    ($externalIdentity.version -eq $expectedPythonVersion -and $externalIdentity.bits -eq '64bit' -and $externalIdentity.implementation -eq 'cpython' -and -not $blockedExternalPath) `
-    "External Python is not reusable standard CPython $expectedPythonVersion x64: $externalPython"
 
 $pythonRegistryRoot = 'HKCU:\Software\Python'
 $pythonCoreRegistry = Join-Path $pythonRegistryRoot 'PythonCore'
@@ -479,12 +605,12 @@ try {
     New-ItemProperty -Path $pythonRegistryTag -Name Version -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $pythonRegistryTag -Name SysVersion -Value $expectedPythonVersion -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $pythonRegistryTag -Name SysArchitecture -Value '64bit' -PropertyType String -Force | Out-Null
-    Set-Item -LiteralPath $pythonRegistry -Value (Split-Path -Parent $externalPython)
-    New-ItemProperty -Path $pythonRegistry -Name ExecutablePath -Value $externalPython -PropertyType String -Force | Out-Null
+    Set-Item -LiteralPath $pythonRegistry -Value (Split-Path -Parent $ReusablePythonPath)
+    New-ItemProperty -Path $pythonRegistry -Name ExecutablePath -Value $ReusablePythonPath -PropertyType String -Force | Out-Null
     Invoke-Setup -Path $InstallerPath -Phase 'reuse_install' -Arguments $setupArguments | Out-Null
     $reuseManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     Test-E2ECondition ($reuseManifest.runtime_ownership -eq 'reused') 'External CPython was not recorded as reused.'
-    Test-E2ECondition ([StringComparer]::OrdinalIgnoreCase.Equals([string]$reuseManifest.base_python, $externalPython)) 'Reused base Python path is incorrect.'
+    Test-E2ECondition ([StringComparer]::OrdinalIgnoreCase.Equals([string]$reuseManifest.base_python, $ReusablePythonPath)) 'Reused base Python path is incorrect.'
     $reuseResultPath = Join-Path $temporaryRoot ("python-runtime-reuse-{0}.json" -f [Guid]::NewGuid().ToString('N'))
     try {
         $reuseVerification = Invoke-ManagedVerification -Path $pythonPath -ResultPath $reuseResultPath -Phase 'reuse_environment_verification'
@@ -499,14 +625,19 @@ try {
     $reuseUninstall = Start-Process -FilePath $reuseUninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
     $evidence.exit_codes['reuse_uninstall'] = $reuseUninstall.ExitCode
     Test-E2ECondition ($reuseUninstall.ExitCode -eq 0) 'Reused-runtime uninstall failed.'
-    Test-E2ECondition (Test-Path -LiteralPath $externalPython -PathType Leaf) 'Reused CPython was removed by uninstall.'
+    $reusablePythonAfterReuseUninstall = Test-ReusablePythonUnchanged `
+        -Path $ReusablePythonPath `
+        -Baseline $reusablePythonBaseline `
+        -ExpectedVersion $expectedPythonVersion `
+        -InstallerOwnedRoot $appRoot `
+        -Phase 'reuse_uninstall'
+    Test-E2ECondition (Test-Path -LiteralPath $ReusablePythonPath -PathType Leaf) 'Reused CPython was removed by uninstall.'
     $reuseUninstallLog = Get-NewInstallerLogPath -BeforePaths $reuseLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'reuse_uninstall'
     $evidence.log_paths['reuse_uninstall'] = $reuseUninstallLog
-    Test-E2ECondition ((Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash -eq $externalHash) 'Reused CPython was modified by uninstall.'
-    Test-E2ECondition ((Get-Item -LiteralPath $externalPython).Length -eq $externalLength) 'Reused CPython size changed during uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath (Join-Path $appRoot 'venv'))) 'Managed environment survived reused-runtime uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) 'Installed manifest survived reused-runtime uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath $registryPath)) 'Discovery metadata survived reused-runtime uninstall.'
+    Test-E2ECondition (-not (Test-Path -LiteralPath $startMenu)) 'Start menu shortcuts survived reused-runtime uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath $appRoot)) 'Application root survived reused-runtime uninstall.'
     foreach ($retainedLog in $reuseLogsGuaranteedRetained) {
         Test-E2ECondition (Test-Path -LiteralPath $retainedLog -PathType Leaf) "Reuse uninstall removed retained log: $retainedLog"
@@ -515,12 +646,25 @@ try {
     Test-E2ECondition ($logsAfterReuseUninstall.Count -le 20) 'Reused-runtime uninstall exceeded the newest-20 log retention bound.'
     Test-PathsUnchanged -ExpectedUserPath $userPathBefore -ExpectedMachinePath $machinePathBefore
     $evidence['reused_runtime'] = [ordered]@{
-        path = $externalPython
-        version = [string]$externalIdentity.version
-        architecture = [string]$externalIdentity.bits
-        sha256_before = $externalHash.ToLowerInvariant()
-        sha256_after = (Get-FileHash -LiteralPath $externalPython -Algorithm SHA256).Hash.ToLowerInvariant()
+        path = $ReusablePythonPath
+        version = [string]$reusablePythonBaseline.version
+        architecture = [string]$reusablePythonBaseline.architecture
+        implementation = [string]$reusablePythonBaseline.implementation
+        is_virtual_environment = [bool]$reusablePythonBaseline.is_virtual_environment
+        sha256_before = [string]$reusablePythonBaseline.sha256
+        sha256_after_private_uninstall = [string]$reusablePythonAfterPrivateUninstall.sha256
+        sha256_after_reuse_uninstall = [string]$reusablePythonAfterReuseUninstall.sha256
+        sha256_after = [string]$reusablePythonAfterReuseUninstall.sha256
+        length_before = [Int64]$reusablePythonBaseline.length
+        length_after_private_uninstall = [Int64]$reusablePythonAfterPrivateUninstall.length
+        length_after_reuse_uninstall = [Int64]$reusablePythonAfterReuseUninstall.length
+        private_uninstall_preserved = $true
+        reuse_uninstall_preserved = $true
         preserved = $true
+        managed_environment_removed = $true
+        application_root_removed = $true
+        registry_removed = $true
+        start_menu_removed = $true
         registry_tag = $pythonRegistryTag
         uninstall_log_path = $reuseUninstallLog
         retained_log_count = $logsAfterReuseUninstall.Count

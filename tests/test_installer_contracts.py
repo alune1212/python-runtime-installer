@@ -117,6 +117,12 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "application_root_removed",
         "manifest_preserved",
         "staging_verified",
+        "staging_cleaned",
+        "previous_environment_absent",
+        "manifest_sha256_before",
+        "manifest_sha256_after",
+        "Start menu shortcuts survived reused-runtime uninstall.",
+        "start_menu_removed",
         "registry_tag",
         "registry_restored",
         "Get-NewInstallerLogPath",
@@ -130,6 +136,50 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         assert required in test_script
     assert "Set-Item -LiteralPath $pythonRegistry -Value" in test_script
     assert "(Get-Item -LiteralPath $pythonRegistry).SetValue" not in test_script
+
+
+def test_end_to_end_reuse_fixture_is_explicit_stable_and_captured_before_mutation() -> None:
+    harness = read("scripts/build/Test-Installer.ps1")
+    for required in (
+        "[string]$ReusablePythonPath = ''",
+        "ReusablePythonPath is required; implicit Python discovery is not allowed.",
+        "Get-ReusablePythonSnapshot",
+        "Test-ReusablePythonUnchanged",
+        "struct.calcsize(''P'') * 8",
+        "machine=platform.machine()",
+        "executable=os.path.realpath(sys.executable)",
+        "prefix=os.path.realpath(sys.prefix)",
+        "base_prefix=os.path.realpath(sys.base_prefix)",
+        "is_virtual_environment=sys.prefix != sys.base_prefix",
+        "windowsapps|anaconda|miniconda|conda|embedded",
+        "captured_before_install = $true",
+        "reusable_python_sha256_after",
+        "sha256_after_private_uninstall",
+        "sha256_after_reuse_uninstall",
+        "length_after_private_uninstall",
+        "length_after_reuse_uninstall",
+        "private_uninstall_preserved",
+        "reuse_uninstall_preserved",
+        "ExecutablePath -Value $ReusablePythonPath",
+        "$reuseManifest.base_python, $ReusablePythonPath",
+    ):
+        assert required in harness
+    assert "Get-Command python.exe" not in harness
+
+    baseline = harness.index("$reusablePythonBaseline = Get-ReusablePythonSnapshot")
+    forced_install = harness.index("-Phase 'forced_private_install'")
+    private_exit = harness.index("Test-E2ECondition ($privateUninstall.ExitCode -eq 0)")
+    private_checkpoint = harness.index(
+        "$reusablePythonAfterPrivateUninstall = Test-ReusablePythonUnchanged"
+    )
+    pep_514_registration = harness.index("$pythonRegistryRoot = 'HKCU:\\Software\\Python'")
+    reuse_exit = harness.index("Test-E2ECondition ($reuseUninstall.ExitCode -eq 0)")
+    reuse_checkpoint = harness.index(
+        "$reusablePythonAfterReuseUninstall = Test-ReusablePythonUnchanged"
+    )
+    assert baseline < forced_install
+    assert private_exit < private_checkpoint < pep_514_registration
+    assert reuse_exit < reuse_checkpoint
 
 
 def test_end_to_end_reports_process_failure_before_log_discovery() -> None:
@@ -198,6 +248,89 @@ def test_all_workflow_actions_are_pinned_to_full_commit_shas() -> None:
         assert uses
         for reference in uses:
             assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", reference), (workflow, reference)
+
+
+def test_windows_installer_workflows_use_an_unregistered_exact_uv_python() -> None:
+    workflow_paths = (
+        ".github/workflows/build-installer.yml",
+        ".github/workflows/dependency-update.yml",
+    )
+    for workflow_path in workflow_paths:
+        workflow = read(workflow_path)
+        assert "actions/setup-python" not in workflow
+        assert "astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9" in workflow
+        for required in (
+            '"cpython-$expectedPythonVersion-windows-x86_64-none"',
+            "uv python install --no-registry --no-bin $managedPythonKey",
+            "uv --directory $env:RUNNER_TEMP python find",
+            "--no-project",
+            "--managed-python",
+            "--no-python-downloads",
+            "--resolve-links",
+            "UV_PYTHON_DOWNLOADS=never",
+            "Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append",
+            "uv sync --frozen --python $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+            "Prepare-Payload.ps1 -PythonExecutable $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+            "-ReusablePythonPath $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+        ):
+            assert required in workflow
+
+    build_workflow = read(".github/workflows/build-installer.yml")
+    assert "The isolated build Python did not survive installer end-to-end testing." in (
+        build_workflow
+    )
+    readme = read("README.md")
+    assert "uv python install --no-registry --no-bin $managedPythonKey" in readme
+    assert "-ReusablePythonPath $buildPython" in readme
+
+
+def test_windows_workflow_native_commands_fail_closed() -> None:
+    build_workflow = read(".github/workflows/build-installer.yml")
+    dependency_workflow = read(".github/workflows/dependency-update.yml")
+
+    for workflow in (build_workflow, dependency_workflow):
+        assert "Installing the pinned OpenSpec CLI failed." in workflow
+        assert "Strict OpenSpec validation failed." in workflow
+
+    assert build_workflow.count("function Confirm-NativeExitCode") == 1
+    for label in (
+        "uv sync --frozen",
+        "validate_config",
+        "lock_requirements --check",
+        "validate_vulnerability_exceptions",
+        "validate_desktop_acceptance",
+        "ruff format --check",
+        "ruff check",
+        "pytest",
+        "scan_repository",
+        "generate_inno_config",
+        "git diff --check",
+        "generated Inno configuration clean-diff check",
+    ):
+        assert f"Confirm-NativeExitCode '{label}'" in build_workflow
+
+    assert dependency_workflow.count("function Confirm-NativeExitCode") == 3
+    for label in (
+        "initial uv sync --frozen",
+        "lock_requirements --upgrade",
+        "uv lock --upgrade",
+        "updated uv sync --frozen",
+        "audit_dependencies",
+        "pushing the dependency refresh branch",
+        "querying the dependency refresh pull request",
+        "creating or updating the dependency refresh pull request",
+    ):
+        assert f"Confirm-NativeExitCode '{label}'" in dependency_workflow
+
+    assert "$statusOutput = git status --short" in dependency_workflow
+    assert "git ls-remote --exit-code --heads origin" in dependency_workflow
+    assert 'git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"' in (
+        dependency_workflow
+    )
+    assert "elseif ($lsRemoteExitCode -eq 2)" in dependency_workflow
+    assert 'git fetch origin "${branch}:refs/remotes/origin/${branch}" 2>$null' not in (
+        dependency_workflow
+    )
 
 
 def test_monthly_refresh_is_review_only_and_skips_unchanged_output() -> None:
