@@ -115,6 +115,28 @@ function Get-ProductConfig {
     return Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Get-NativeWindowsArchitecture {
+    [CmdletBinding()]
+    param()
+
+    if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        return $env:PROCESSOR_ARCHITEW6432.ToUpperInvariant()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITECTURE)) {
+        return $env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()
+    }
+
+    $systemEnvironment = Get-ItemProperty `
+        -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+        -Name 'PROCESSOR_ARCHITECTURE' `
+        -ErrorAction Stop
+    $architecture = [string]$systemEnvironment.PROCESSOR_ARCHITECTURE
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        throw 'Unable to determine the native Windows architecture.'
+    }
+    return $architecture.ToUpperInvariant()
+}
+
 function Assert-WindowsPreflight {
     [CmdletBinding()]
     param(
@@ -130,7 +152,7 @@ function Assert-WindowsPreflight {
     if ($productName -match 'Server') {
         throw "Windows Server is not a supported target: $productName"
     }
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $architecture = Get-NativeWindowsArchitecture
     if ($architecture -ne 'AMD64') {
         throw "Unsupported Windows architecture: $architecture"
     }
@@ -509,6 +531,7 @@ Export-ModuleMember -Function @(
     'Get-InstallerLogPath',
     'Invoke-LoggedProcess',
     'Get-ProductConfig',
+    'Get-NativeWindowsArchitecture',
     'Assert-WindowsPreflight',
     'Test-IsCandidatePathAllowed',
     'Test-CompatiblePython',

@@ -40,12 +40,22 @@ $machinePathBefore = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 $secretSentinel = "installer-e2e-secret-{0}" -f [Guid]::NewGuid().ToString('N')
 $env:PYTHON_RUNTIME_INSTALLER_E2E_SECRET = $secretSentinel
 $installerSignature = Get-AuthenticodeSignature -LiteralPath $InstallerPath
+$nativeArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+    $env:PROCESSOR_ARCHITEW6432.ToUpperInvariant()
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITECTURE)) {
+    $env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()
+} else {
+    [string](Get-ItemProperty `
+        -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+        -Name 'PROCESSOR_ARCHITECTURE' `
+        -ErrorAction Stop).PROCESSOR_ARCHITECTURE
+}
 $evidence = [ordered]@{
     schema_version = 1
     collected_at = [DateTime]::UtcNow.ToString('o')
     host = [ordered]@{
         windows_version = [Environment]::OSVersion.VersionString
-        architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+        architecture = $nativeArchitecture
         powershell_version = $PSVersionTable.PSVersion.ToString()
         powershell_edition = [string]$PSVersionTable.PSEdition
     }

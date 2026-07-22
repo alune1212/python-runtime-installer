@@ -62,6 +62,22 @@ Describe 'Candidate selection' {
 }
 
 Describe 'Lifecycle primitives' {
+    It 'falls back to the system environment registry for native architecture' {
+        $savedArchitecture = $env:PROCESSOR_ARCHITECTURE
+        $savedWowArchitecture = $env:PROCESSOR_ARCHITEW6432
+        try {
+            $env:PROCESSOR_ARCHITECTURE = $null
+            $env:PROCESSOR_ARCHITEW6432 = $null
+            Mock Get-ItemProperty {
+                [PSCustomObject]@{ PROCESSOR_ARCHITECTURE = 'AMD64' }
+            } -ModuleName RuntimeInstaller
+            Get-NativeWindowsArchitecture | Should -Be 'AMD64'
+        } finally {
+            $env:PROCESSOR_ARCHITECTURE = $savedArchitecture
+            $env:PROCESSOR_ARCHITEW6432 = $savedWowArchitecture
+        }
+    }
+
     It 'compares upgrade and downgrade versions without string ordering' {
         Compare-InstallerVersion -InstalledVersion '0.2.0' -IncomingVersion '0.1.9' | Should -BeGreaterThan 0
         Compare-InstallerVersion -InstalledVersion '0.1.0' -IncomingVersion '0.2.0' | Should -BeLessThan 0
