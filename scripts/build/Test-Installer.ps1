@@ -91,6 +91,25 @@ function Get-NewInstallerLogPath([string[]]$BeforePaths, [string]$Pattern, [stri
     return $newLogs[0].FullName
 }
 
+function Get-SanitizedSetupLogTail([int]$LineCount = 80) {
+    if (-not (Test-Path -LiteralPath $setupLog -PathType Leaf)) {
+        return '<Inno Setup log is missing>'
+    }
+
+    try {
+        $tail = (Get-Content -LiteralPath $setupLog -Tail $LineCount -ErrorAction Stop) -join [Environment]::NewLine
+    } catch {
+        return ("<could not read Inno Setup log: {0}>" -f $_.Exception.Message)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($secretSentinel)) {
+        $tail = $tail.Replace($secretSentinel, '<redacted-sentinel>')
+    }
+    $tail = $tail -replace 'gh[pousr]_[A-Za-z0-9]{30,}', '<redacted-github-token>'
+    $tail = $tail -replace 'github_pat_[A-Za-z0-9_]{30,}', '<redacted-github-token>'
+    $tail = $tail -replace 'AKIA[0-9A-Z]{16}', '<redacted-access-key>'
+    return $tail
+}
+
 function Test-PathsUnchanged([string]$ExpectedUserPath, [string]$ExpectedMachinePath) {
     Test-E2ECondition `
         ([Environment]::GetEnvironmentVariable('Path', 'User') -eq $ExpectedUserPath) `
@@ -143,10 +162,16 @@ function Invoke-Setup(
     $script:evidence.commands[$Phase] = "$([System.IO.Path]::GetFileName($Path)) $($Arguments -join ' ')"
     $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
     $script:evidence.exit_codes[$Phase] = $process.ExitCode
-    $script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath -BeforePaths $logsBefore -Pattern 'installer-install-*.log' -Phase $Phase
 
     if ($AllowedExitCodes -notcontains $process.ExitCode) {
-        throw "Installer phase $Phase exited with $($process.ExitCode). See $setupLog"
+        $setupLogTail = Get-SanitizedSetupLogTail
+        throw "Installer phase $Phase exited with $($process.ExitCode). Inno Setup log tail:`n$setupLogTail"
+    }
+    try {
+        $script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath -BeforePaths $logsBefore -Pattern 'installer-install-*.log' -Phase $Phase
+    } catch {
+        $setupLogTail = Get-SanitizedSetupLogTail
+        throw "$($_.Exception.Message)`nInno Setup log tail:`n$setupLogTail"
     }
     return $process.ExitCode
 }

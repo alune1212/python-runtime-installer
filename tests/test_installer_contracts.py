@@ -132,6 +132,17 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
     assert "(Get-Item -LiteralPath $pythonRegistry).SetValue" not in test_script
 
 
+def test_end_to_end_reports_process_failure_before_log_discovery() -> None:
+    test_script = read("scripts/build/Test-Installer.ps1")
+    exit_check = test_script.index("if ($AllowedExitCodes -notcontains $process.ExitCode)")
+    log_discovery = test_script.index(
+        "$script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath"
+    )
+    assert exit_check < log_discovery
+    assert "Get-SanitizedSetupLogTail" in test_script
+    assert "<redacted-github-token>" in test_script
+
+
 def test_private_runtime_uninstall_removes_saved_installer() -> None:
     module = read("scripts/windows/RuntimeInstaller.psm1")
     assert "Remove-Item -LiteralPath $savedInstaller -Force" in module
