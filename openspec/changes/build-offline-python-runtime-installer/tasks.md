@@ -65,8 +65,8 @@
 - [x] 7.2 Add formatting, Python lint/test, PowerShell analysis/test, lock consistency, secret scanning, and strict OpenSpec validation commands for contributors.
 - [x] 7.3 Add a pull-request and ordinary-push CI workflow with least-privilege permissions and every third-party action pinned to a full commit SHA.
 - [x] 7.4 Add the Windows full-build workflow to install pinned build tools, verify CPython and Inno Setup downloads, generate the payload, and compile the versioned executable.
-- [ ] 7.5 Run the built EXE silently with the forced private runtime and assert successful verification, fixed paths, registry metadata, manifest content, Start menu entries, and retained logs.
-- [ ] 7.6 Rerun the same EXE to test idempotent repair, then silently uninstall and assert owned-content removal plus reused-runtime and log preservation.
+- [x] 7.5 Run the built EXE silently with the forced private runtime and assert successful verification, fixed paths, registry metadata, manifest content, Start menu entries, and retained logs.
+- [x] 7.6 Rerun the same EXE to test idempotent repair, then silently uninstall and assert owned-content removal plus reused-runtime and log preservation.
 - [x] 7.7 Add controlled tests for the reusable-interpreter branch and make every end-to-end failure block artifact upload or release.
 
 ## 8. Signing, Release Evidence, and Publication
