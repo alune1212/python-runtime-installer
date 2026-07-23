@@ -214,5 +214,24 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Python Runtime Installer generated payloads and private signing material
+# The repository's build automation is source code, despite the generic build/ rule above.
+!scripts/build/
+artifacts/
+payload/
+wheelhouse/
+installer/output/
+*.pfx
+*.p12
+*.pvk
+*.snk
+*.cer
+*.crt
+*.key
+*.pem
+!tests/fixtures/*.crt
+*.install.log
+*.setup.log
+
 # Streamlit
 .streamlit/secrets.toml

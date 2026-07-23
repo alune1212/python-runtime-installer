@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*.*.*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: Synchronize development environment
+        run: uv sync --frozen
+      - name: Validate configuration and immutable locks
+        run: |
+          uv run python -m scripts.build.validate_config
+          uv run python -m scripts.build.lock_requirements --check
+          uv run python -m scripts.build.validate_vulnerability_exceptions
+          uv run python -m scripts.build.validate_desktop_acceptance
+      - name: Check generated installer metadata
+        run: |
+          uv run python -m scripts.build.generate_inno_config
+          git diff --exit-code -- installer/generated-config.iss
+      - name: Format, lint, test, and scan
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run pytest
+          uv run python -m scripts.build.scan_repository
+      - name: Strict OpenSpec validation
+        run: |
+          npm install --global @fission-ai/openspec@1.6.0
+          openspec validate --all --strict
+
+  windows-powershell-contracts:
+    runs-on: windows-2025
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned PowerShell test tools
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+      - name: Analyze Windows PowerShell 5.1 scripts
+        shell: powershell
+        run: |
+          $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings config/PSScriptAnalyzerSettings.psd1
+          $findings | Format-Table -AutoSize
+          if ($findings) { throw 'PSScriptAnalyzer reported blocking findings.' }
+      - name: Run Windows PowerShell 5.1 contracts
+        shell: powershell
+        run: Invoke-Pester -Path tests/powershell -CI -Output Detailed

@@ -1,0 +1,351 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_target_install_is_offline_hash_checked_and_transactional() -> None:
+    script = read("scripts/windows/Install-Runtime.ps1")
+    for required in (
+        "--no-index",
+        "--find-links",
+        "--require-hashes",
+        "--no-deps",
+        "'.staging\\'",
+        "'.previous-'",
+        "Move-Item -LiteralPath $stageVenv -Destination $activeRoot",
+        "Publish-DiscoveryRegistration",
+        "Downgrade blocked",
+    ):
+        assert required in script
+    assert "Invoke-WebRequest" not in script
+    assert "http://" not in script and "https://" not in script
+
+
+def test_private_runtime_never_changes_path_or_machine_scope() -> None:
+    module = read("scripts/windows/RuntimeInstaller.psm1")
+    for required in (
+        "InstallAllUsers=0",
+        "Include_launcher=0",
+        "AssociateFiles=0",
+        "Shortcuts=0",
+        "PrependPath=0",
+        "AppendPath=0",
+    ):
+        assert required in module
+    assert "setx" not in module.lower()
+
+
+def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> None:
+    project = read("installer/python-runtime-installer.iss")
+    for required in (
+        "PrivilegesRequired=lowest",
+        "DefaultDirName={localappdata}\\Programs\\Python Runtime Installer",
+        'Name: "english"',
+        'Name: "chinesesimplified"',
+        "/FORCEBUNDLED",
+        "ExecutionPolicy Bypass",
+        'WorkingDir: "{%USERPROFILE|{userdocs}}"',
+        "ChangesEnvironment=no",
+        "RestartApplications=no",
+        "CompareSemVer(InstalledVersion, '{#ProductVersion}') > 0",
+        "ManagedExitCode := 21",
+    ):
+        assert required in project
+    assert "{commondesktop}" not in project
+    assert "{userdesktop}" not in project
+    assert "{userprofile}" not in project
+
+
+def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
+    script = read("scripts/build/Install-InnoSetup.ps1")
+    for required in (
+        "/CURRENTUSER",
+        "/PORTABLE=1",
+        "/NOICONS",
+        "chinese_translation",
+        "translation hash mismatch",
+    ):
+        assert required in script
+
+
+def test_lifecycle_script_contains_rollback_and_ownership_guards() -> None:
+    install = read("scripts/windows/Install-Runtime.ps1")
+    uninstall = read("scripts/windows/Uninstall-Runtime.ps1")
+    runtime = read("scripts/windows/RuntimeInstaller.psm1")
+    assert "previousManifestPath" in install
+    assert "Get-DiscoveryMetadataSnapshot" in install
+    assert "Restore-DiscoveryRegistration" in install
+    assert "runtime_ownership = $runtimeOwnership" in install
+    assert "runtime_ownership -eq 'private'" in uninstall
+    assert "Remove-Item -LiteralPath $manifestPath -Force" in uninstall
+    assert "retained logs were preserved" in uninstall
+    assert "Move-Item -LiteralPath $previousRoot -Destination" in install
+    assert "$activationCommitted = $true" in install
+    assert "Write-InstallStatus -Value 'downgrade-blocked'" in install
+    assert "exit 21" in install
+    assert "$previousManifestPath = $manifestBackupPath" in install
+    assert "$manifestPublished = $true" in install
+    assert "TestFailAfterStagingVerification" in install
+    assert "Get-RegisteredPythonCandidate" in runtime
+    assert "HKCU:\\Software\\Python\\PythonCore" in runtime
+    assert "$ExpectedVersion\\InstallPath" not in runtime
+
+
+def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
+    test_script = read("scripts/build/Test-Installer.ps1")
+    for required in (
+        "/FORCEBUNDLED",
+        "healthyManifestHash",
+        "/E2EFAILAFTERSTAGING",
+        "custom_drift-1.0.dist-info",
+        "runtime_ownership -eq 'reused'",
+        "dict(version=platform.python_version()",
+        "Reused CPython was removed by uninstall",
+        "failed_staging",
+        "installer-e2e-evidence.json",
+        "Test-PathsUnchanged",
+        "verification_checks",
+        "private_python_removed",
+        "manifest_removed",
+        "application_root_removed",
+        "manifest_preserved",
+        "staging_verified",
+        "staging_cleaned",
+        "previous_environment_absent",
+        "manifest_sha256_before",
+        "manifest_sha256_after",
+        "Start menu shortcuts survived reused-runtime uninstall.",
+        "start_menu_removed",
+        "registry_tag",
+        "registry_restored",
+        "Get-NewInstallerLogPath",
+        "log_paths",
+        "Select-Object -First 19",
+        "retention_bound = 20",
+        "scanned_phase_logs",
+        "3.13-e2e-",
+        "SysVersion",
+    ):
+        assert required in test_script
+    assert "Set-Item -LiteralPath $pythonRegistry -Value" in test_script
+    assert "(Get-Item -LiteralPath $pythonRegistry).SetValue" not in test_script
+
+
+def test_end_to_end_reuse_fixture_is_explicit_stable_and_captured_before_mutation() -> None:
+    harness = read("scripts/build/Test-Installer.ps1")
+    for required in (
+        "[string]$ReusablePythonPath = ''",
+        "ReusablePythonPath is required; implicit Python discovery is not allowed.",
+        "Get-ReusablePythonSnapshot",
+        "Test-ReusablePythonUnchanged",
+        "struct.calcsize(''P'') * 8",
+        "machine=platform.machine()",
+        "executable=os.path.realpath(sys.executable)",
+        "prefix=os.path.realpath(sys.prefix)",
+        "base_prefix=os.path.realpath(sys.base_prefix)",
+        "is_virtual_environment=sys.prefix != sys.base_prefix",
+        "windowsapps|anaconda|miniconda|conda|embedded",
+        "captured_before_install = $true",
+        "reusable_python_sha256_after",
+        "sha256_after_private_uninstall",
+        "sha256_after_reuse_uninstall",
+        "length_after_private_uninstall",
+        "length_after_reuse_uninstall",
+        "private_uninstall_preserved",
+        "reuse_uninstall_preserved",
+        "ExecutablePath -Value $ReusablePythonPath",
+        "$reuseManifest.base_python, $ReusablePythonPath",
+    ):
+        assert required in harness
+    assert "Get-Command python.exe" not in harness
+
+    baseline = harness.index("$reusablePythonBaseline = Get-ReusablePythonSnapshot")
+    forced_install = harness.index("-Phase 'forced_private_install'")
+    private_exit = harness.index("Test-E2ECondition ($privateUninstall.ExitCode -eq 0)")
+    private_checkpoint = harness.index(
+        "$reusablePythonAfterPrivateUninstall = Test-ReusablePythonUnchanged"
+    )
+    pep_514_registration = harness.index("$pythonRegistryRoot = 'HKCU:\\Software\\Python'")
+    reuse_exit = harness.index("Test-E2ECondition ($reuseUninstall.ExitCode -eq 0)")
+    reuse_checkpoint = harness.index(
+        "$reusablePythonAfterReuseUninstall = Test-ReusablePythonUnchanged"
+    )
+    assert baseline < forced_install
+    assert private_exit < private_checkpoint < pep_514_registration
+    assert reuse_exit < reuse_checkpoint
+
+
+def test_end_to_end_reports_process_failure_before_log_discovery() -> None:
+    test_script = read("scripts/build/Test-Installer.ps1")
+    exit_check = test_script.index("if ($AllowedExitCodes -notcontains $process.ExitCode)")
+    log_discovery = test_script.index(
+        "$script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath"
+    )
+    assert exit_check < log_discovery
+    assert "Get-SanitizedSetupLogTail" in test_script
+    assert "<redacted-github-token>" in test_script
+
+
+def test_windows_server_e2e_override_is_explicit_and_github_hosted_only() -> None:
+    project = read("installer/python-runtime-installer.iss")
+    install = read("scripts/windows/Install-Runtime.ps1")
+    runtime = read("scripts/windows/RuntimeInstaller.psm1")
+    harness = read("scripts/build/Test-Installer.ps1")
+
+    for required in (
+        "HasCommandLineSwitch('/E2EALLOWWINDOWSSERVER')",
+        "CompareText(GetEnv('GITHUB_ACTIONS'), 'true') = 0",
+        "CompareText(GetEnv('RUNNER_ENVIRONMENT'), 'github-hosted') = 0",
+        "not IsGitHubHostedServerE2EAllowed()",
+        "Parameters := Parameters + ' -AllowWindowsServerForE2E';",
+    ):
+        assert required in project
+    assert "[switch]$AllowWindowsServerForE2E" in install
+    assert "-AllowWindowsServerForE2E:$AllowWindowsServerForE2E" in install
+    assert "Test-WindowsServerE2EOverrideAllowed" in runtime
+    assert "if ($AllowWindowsServerForE2E -and -not $serverE2EOverrideAllowed)" in runtime
+    assert "if ($productName -match 'Server' -and -not $serverE2EOverrideAllowed)" in runtime
+    for required in (
+        "$isWindowsServer = $windowsProductName -match 'Server'",
+        "[StringComparer]::OrdinalIgnoreCase.Equals([string]$env:GITHUB_ACTIONS, 'true')",
+        "[StringComparer]::OrdinalIgnoreCase.Equals("
+        "[string]$env:RUNNER_ENVIRONMENT, 'github-hosted')",
+        "$allowWindowsServerForE2E = $isWindowsServer -and $isGitHubHostedRunner",
+        "if ($allowWindowsServerForE2E)",
+        "windows_server_e2e_override = $allowWindowsServerForE2E",
+    ):
+        assert required in harness
+    assert harness.count("/E2EALLOWWINDOWSSERVER") == 1
+
+
+def test_private_runtime_uninstall_removes_saved_installer() -> None:
+    module = read("scripts/windows/RuntimeInstaller.psm1")
+    assert "Remove-Item -LiteralPath $savedInstaller -Force" in module
+
+
+def test_generated_inno_config_is_current_and_app_id_is_escaped() -> None:
+    generated = read("installer/generated-config.iss")
+    assert '#define AppId "{{779F23D1-372D-4A68-AD18-80C5116A8B50}"' in generated
+    assert '#define ProductVersion "0.1.0"' in generated
+
+
+def test_all_workflow_actions_are_pinned_to_full_commit_shas() -> None:
+    workflows = list((ROOT / ".github" / "workflows").glob("*.yml"))
+    assert {path.name for path in workflows} == {
+        "build-installer.yml",
+        "ci.yml",
+        "dependency-update.yml",
+    }
+    for workflow in workflows:
+        uses = re.findall(r"^\s*uses:\s*([^\s]+)", workflow.read_text(encoding="utf-8"), re.M)
+        assert uses
+        for reference in uses:
+            assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", reference), (workflow, reference)
+
+
+def test_windows_installer_workflows_use_an_unregistered_exact_uv_python() -> None:
+    workflow_paths = (
+        ".github/workflows/build-installer.yml",
+        ".github/workflows/dependency-update.yml",
+    )
+    for workflow_path in workflow_paths:
+        workflow = read(workflow_path)
+        assert "actions/setup-python" not in workflow
+        assert "astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9" in workflow
+        for required in (
+            '"cpython-$expectedPythonVersion-windows-x86_64-none"',
+            "uv python install --no-registry --no-bin $managedPythonKey",
+            "uv --directory $env:RUNNER_TEMP python find",
+            "--no-project",
+            "--managed-python",
+            "--no-python-downloads",
+            "--resolve-links",
+            "UV_PYTHON_DOWNLOADS=never",
+            "Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append",
+            "uv sync --frozen --python $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+            "Prepare-Payload.ps1 -PythonExecutable $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+            "-ReusablePythonPath $env:PYTHON_RUNTIME_INSTALLER_BUILD_PYTHON",
+        ):
+            assert required in workflow
+
+    build_workflow = read(".github/workflows/build-installer.yml")
+    assert "The isolated build Python did not survive installer end-to-end testing." in (
+        build_workflow
+    )
+    readme = read("README.md")
+    assert "uv python install --no-registry --no-bin $managedPythonKey" in readme
+    assert "-ReusablePythonPath $buildPython" in readme
+
+
+def test_windows_workflow_native_commands_fail_closed() -> None:
+    build_workflow = read(".github/workflows/build-installer.yml")
+    dependency_workflow = read(".github/workflows/dependency-update.yml")
+
+    for workflow in (build_workflow, dependency_workflow):
+        assert "Installing the pinned OpenSpec CLI failed." in workflow
+        assert "Strict OpenSpec validation failed." in workflow
+
+    assert build_workflow.count("function Confirm-NativeExitCode") == 1
+    for label in (
+        "uv sync --frozen",
+        "validate_config",
+        "lock_requirements --check",
+        "validate_vulnerability_exceptions",
+        "validate_desktop_acceptance",
+        "ruff format --check",
+        "ruff check",
+        "pytest",
+        "scan_repository",
+        "generate_inno_config",
+        "git diff --check",
+        "generated Inno configuration clean-diff check",
+    ):
+        assert f"Confirm-NativeExitCode '{label}'" in build_workflow
+
+    assert dependency_workflow.count("function Confirm-NativeExitCode") == 3
+    for label in (
+        "initial uv sync --frozen",
+        "lock_requirements --upgrade",
+        "uv lock --upgrade",
+        "updated uv sync --frozen",
+        "audit_dependencies",
+        "pushing the dependency refresh branch",
+        "querying the dependency refresh pull request",
+        "creating or updating the dependency refresh pull request",
+    ):
+        assert f"Confirm-NativeExitCode '{label}'" in dependency_workflow
+
+    assert "$statusOutput = git status --short" in dependency_workflow
+    assert "git ls-remote --exit-code --heads origin" in dependency_workflow
+    assert 'git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"' in (
+        dependency_workflow
+    )
+    assert "elseif ($lsRemoteExitCode -eq 2)" in dependency_workflow
+    assert 'git fetch origin "${branch}:refs/remotes/origin/${branch}" 2>$null' not in (
+        dependency_workflow
+    )
+
+
+def test_monthly_refresh_is_review_only_and_skips_unchanged_output() -> None:
+    workflow = read(".github/workflows/dependency-update.yml")
+    assert "No compatible dependency updates were found." in workflow
+    assert "if: steps.changes.outputs.changed == 'true'" in workflow
+    assert "gh pr create" in workflow
+    assert "gh pr merge" not in workflow
+    assert "gh release" not in workflow
+    assert "git tag" not in workflow
+
+
+def test_release_only_runs_for_tags_after_the_build_gate() -> None:
+    workflow = read(".github/workflows/build-installer.yml")
+    assert "if: startsWith(github.ref, 'refs/tags/')" in workflow
+    assert "needs: build-and-test" in workflow
+    assert "--prerelease" in workflow
+    assert "workflow_dispatch:" in workflow

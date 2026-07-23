@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "Python Runtime Installer",
+    "publisher": "Alune",
+    "version": "0.1.0",
+    "app_id": "779F23D1-372D-4A68-AD18-80C5116A8B50",
+    "install_dir_relative": "Programs\\Python Runtime Installer",
+    "log_dir_relative": "PythonRuntimeInstaller\\Logs",
+    "registry_path": "Software\\Alune\\Python Runtime Installer",
+    "output_basename": "python-runtime-installer"
+  },
+  "target": {
+    "operating_systems": [
+      "Windows 10",
+      "Windows 11"
+    ],
+    "architecture": "x86_64",
+    "minimum_free_bytes": 2147483648,
+    "python": {
+      "implementation": "CPython",
+      "version": "3.13.14",
+      "filename": "python-3.13.14-amd64.exe",
+      "url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.exe",
+      "sha256": "c54d9b9bbb8a36e6489363ddd01139707fd781d72f1f9e90c7ec65d0061368e0",
+      "expected_publisher": "Python Software Foundation",
+      "license_url": "https://raw.githubusercontent.com/python/cpython/v3.13.14/LICENSE",
+      "license_sha256": "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb"
+    }
+  },
+  "build": {
+    "uv_version": "0.11.29",
+    "windows_runner": "windows-2025",
+    "inno_setup": {
+      "version": "6.7.3",
+      "filename": "innosetup-6.7.3.exe",
+      "url": "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe",
+      "sha256": "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732",
+      "expected_publisher": "Pyrsys B.V.",
+      "license_url": "https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/license.txt",
+      "license_sha256": "2e5346868c2a18434489824e11d65c3031620f792fefc415d05f19cd441abf5c",
+      "chinese_translation": {
+        "version": "6.5.0+",
+        "commit": "6da09d23e14443d4cf8f07b1c5fd821bfe459788",
+        "filename": "ChineseSimplified.isl",
+        "url": "https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/6da09d23e14443d4cf8f07b1c5fd821bfe459788/ChineseSimplified.isl",
+        "sha256": "869e43e7c7b8d20c7e4397c8e98f7d1b7cf0528803acdf019ad350143ec85469",
+        "license_url": "https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/6da09d23e14443d4cf8f07b1c5fd821bfe459788/LICENSE",
+        "license_sha256": "02f0dd3b98833040147d01daf91243c24392a33ddced674152220b5216782c6a"
+      }
+    },
+    "source_evidence_packages": [
+      "mysql-connector-python"
+    ],
+    "powershell_tools": {
+      "Pester": "5.7.1",
+      "PSScriptAnalyzer": "1.24.0"
+    }
+  }
+}

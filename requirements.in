@@ -1,0 +1,17 @@
+# Direct runtime dependencies only. Do not add indexes, URLs, local paths, or
+# environment markers. Run `uv run python -m scripts.build.lock_requirements`
+# to regenerate the immutable, hash-locked requirements.txt.
+beautifulsoup4
+faker
+flask
+matplotlib
+mysql-connector-python
+networkx
+numpy
+openpyxl
+paho-mqtt
+pandas
+scikit-learn
+seaborn
+selenium
+webdriver-manager

@@ -1,0 +1,4 @@
+# Managed bootstrap tooling only. This is separate from the 14-package runtime
+# contract and is installed from the same offline, hash-verified wheelhouse.
+# Resolution and wheel downloads use official PyPI only during CI builds.
+pip
