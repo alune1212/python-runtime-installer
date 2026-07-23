@@ -46,6 +46,69 @@ function Get-InstallerLogPath {
     return $script:InstallerLogPath
 }
 
+function Protect-InstallerDiagnosticText {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $safeText = $Text.Replace("`r", ' ').Replace("`n", ' ')
+    return [regex]::Replace(
+        $safeText,
+        '(?i)\b(token|password|passwd|secret|api[_-]?key)\s*[:=]\s*[^\s;]+',
+        '$1=<redacted>'
+    )
+}
+
+function ConvertTo-InstallerAsciiDiagnosticText {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Fallback
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $Fallback
+    }
+    if ($Text -match '[^\x09\x0A\x0D\x20-\x7E]') {
+        return $Fallback
+    }
+    return Protect-InstallerDiagnosticText -Text $Text
+}
+
+function Format-InstallerErrorRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $exceptionType = ConvertTo-InstallerAsciiDiagnosticText `
+        -Text $ErrorRecord.Exception.GetType().FullName `
+        -Fallback '<unknown>'
+    $errorId = ConvertTo-InstallerAsciiDiagnosticText `
+        -Text ([string]$ErrorRecord.FullyQualifiedErrorId) `
+        -Fallback '<unknown>'
+    $commandName = '<unknown>'
+    $scriptLine = 0
+    if ($ErrorRecord.InvocationInfo) {
+        $scriptLine = $ErrorRecord.InvocationInfo.ScriptLineNumber
+        if ($ErrorRecord.InvocationInfo.MyCommand) {
+            $commandName = ConvertTo-InstallerAsciiDiagnosticText `
+                -Text ([string]$ErrorRecord.InvocationInfo.MyCommand.Name) `
+                -Fallback '<localized-or-non-ascii-command-omitted>'
+        }
+    }
+    $message = ConvertTo-InstallerAsciiDiagnosticText `
+        -Text ([string]$ErrorRecord.Exception.Message) `
+        -Fallback '<localized-or-non-ascii-text-omitted>'
+
+    return (
+        'ExceptionType={0}; ErrorId={1}; Command={2}; ScriptLine={3}; Message={4}' -f
+        $exceptionType,
+        $errorId,
+        $commandName,
+        $scriptLine,
+        $message
+    )
+}
+
 function ConvertTo-ProcessArgument {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
     if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
@@ -255,7 +318,8 @@ function Test-CompatiblePython {
         }
         return $true
     } catch {
-        Write-InstallerLog -Stage 'python-probe' -Level 'WARN' -Message ("Candidate rejected: {0}; {1}" -f $PythonPath, $_.Exception.Message)
+        $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+        Write-InstallerLog -Stage 'python-probe' -Level 'WARN' -Message ("Candidate rejected: {0}; {1}" -f $PythonPath, $diagnostic)
         return $false
     }
 }
@@ -306,7 +370,8 @@ function Get-RegisteredPythonCandidate {
                 $registeredCandidates += [PSCustomObject]@{ Path = [string]$candidate; Exact = $isExactRegistration }
             }
         } catch {
-            Write-InstallerLog -Stage 'python-discovery' -Level 'WARN' -Message ("Registry candidate ignored: {0}; {1}" -f $tagKey.PSPath, $_.Exception.Message)
+            $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+            Write-InstallerLog -Stage 'python-discovery' -Level 'WARN' -Message ("Registry candidate ignored: {0}; {1}" -f $tagKey.PSPath, $diagnostic)
         }
     }
     return @($registeredCandidates | Sort-Object Exact -Descending | Select-Object -ExpandProperty Path -Unique)
@@ -337,7 +402,9 @@ function Get-PythonCandidate {
                 }
             }
         } catch {
-            Write-InstallerLog -Stage 'python-discovery' -Level 'WARN' -Message $_.Exception.Message
+            Write-InstallerLog -Stage 'python-discovery' -Level 'WARN' -Message (
+                Format-InstallerErrorRecord -ErrorRecord $_
+            )
         }
     }
     return @($candidates | Select-Object -Unique)
@@ -448,7 +515,9 @@ function Uninstall-PrivatePython {
         try {
             Invoke-LoggedProcess -FilePath $savedInstaller -Arguments @('/uninstall', '/quiet') -Stage 'python-uninstall' -AllowedExitCodes @(0, 1605, 3010) | Out-Null
         } catch {
-            Write-InstallerLog -Stage 'python-uninstall' -Level 'WARN' -Message $_.Exception.Message
+            Write-InstallerLog -Stage 'python-uninstall' -Level 'WARN' -Message (
+                Format-InstallerErrorRecord -ErrorRecord $_
+            )
         } finally {
             if (Test-Path -LiteralPath $savedInstaller -PathType Leaf) {
                 Remove-Item -LiteralPath $savedInstaller -Force
@@ -459,7 +528,22 @@ function Uninstall-PrivatePython {
 
 function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $stream = $null
+    $algorithm = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($algorithm) {
+            $algorithm.Dispose()
+        }
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
 }
 
 function Test-PayloadManifest {
@@ -620,6 +704,7 @@ Export-ModuleMember -Function @(
     'Initialize-InstallerLog',
     'Write-InstallerLog',
     'Get-InstallerLogPath',
+    'Format-InstallerErrorRecord',
     'Invoke-LoggedProcess',
     'Get-ProductConfig',
     'Get-NativeWindowsArchitecture',

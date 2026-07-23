@@ -33,7 +33,9 @@ function Write-InstallStatus([string]$Value, [string]$Path) {
         try {
             [System.IO.File]::WriteAllText($Path, $Value, (New-Object System.Text.UTF8Encoding($false)))
         } catch {
-            [Console]::Error.WriteLine("Could not write UI status: {0}" -f $_.Exception.Message)
+            [Console]::Error.WriteLine(
+                "Could not write UI status: {0}" -f (Format-InstallerErrorRecord -ErrorRecord $_)
+            )
         }
     }
 }
@@ -83,7 +85,8 @@ try {
                 exit 0
             } catch {
                 $operation = 'repair'
-                Write-InstallerLog -Stage 'repair-check' -Level 'WARN' -Message ("Environment drift detected; rebuilding. {0}" -f $_.Exception.Message)
+                $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+                Write-InstallerLog -Stage 'repair-check' -Level 'WARN' -Message ("Environment drift detected; rebuilding. {0}" -f $diagnostic)
             }
         } elseif ($versionComparison -lt 0) {
             $operation = 'upgrade'
@@ -224,7 +227,8 @@ try {
         try {
             Remove-OwnedDirectory -AppRoot $AppRoot -Path $previousRoot
         } catch {
-            Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Previous environment cleanup deferred: {0}" -f $_.Exception.Message)
+            $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+            Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Previous environment cleanup deferred: {0}" -f $diagnostic)
         }
         $previousRoot = $null
     }
@@ -232,7 +236,8 @@ try {
         try {
             Remove-OwnedDirectory -AppRoot $AppRoot -Path $stageRoot
         } catch {
-            Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Staging cleanup deferred: {0}" -f $_.Exception.Message)
+            $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+            Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Staging cleanup deferred: {0}" -f $diagnostic)
         }
         $stageRoot = $null
     }
@@ -245,11 +250,17 @@ try {
     exit 0
 } catch {
     if ($activationCommitted) {
-        [Console]::Error.WriteLine("Post-commit housekeeping warning: {0}" -f $_.Exception.Message)
+        [Console]::Error.WriteLine(
+            "Post-commit housekeeping warning: {0}" -f (
+                Format-InstallerErrorRecord -ErrorRecord $_
+            )
+        )
         Write-InstallStatus -Value $operation -Path $StatusPath
         exit 0
     }
-    Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message $_.Exception.ToString()
+    Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message (
+        Format-InstallerErrorRecord -ErrorRecord $_
+    )
     Write-InstallStatus -Value 'failed' -Path $StatusPath
     try {
         if ($activationAttempted -and (Test-Path -LiteralPath (Join-Path $AppRoot 'venv'))) {
@@ -273,7 +284,9 @@ try {
             Uninstall-PrivatePython -AppRoot $AppRoot -InstallerFilename ([string]$config.target.python.filename)
         }
     } catch {
-        Write-InstallerLog -Stage 'rollback' -Level 'ERROR' -Message $_.Exception.ToString()
+        Write-InstallerLog -Stage 'rollback' -Level 'ERROR' -Message (
+            Format-InstallerErrorRecord -ErrorRecord $_
+        )
     }
     exit 20
 }

@@ -40,6 +40,8 @@ try {
     Write-InstallerLog -Stage 'complete' -Message 'Managed runtime uninstall completed; retained logs were preserved.'
     exit 0
 } catch {
-    Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message $_.Exception.ToString()
+    Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message (
+        Format-InstallerErrorRecord -ErrorRecord $_
+    )
     exit 30
 }

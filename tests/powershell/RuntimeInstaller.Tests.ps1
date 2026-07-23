@@ -209,7 +209,14 @@ Describe 'Lifecycle primitives' {
         New-Item -ItemType Directory -Path $payload | Out-Null
         $file = Join-Path $payload '文件.txt'
         [System.IO.File]::WriteAllText($file, 'verified', (New-Object System.Text.UTF8Encoding($false)))
-        $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        $stream = [System.IO.File]::OpenRead($file)
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $algorithm.Dispose()
+            $stream.Dispose()
+        }
         $manifest = @{ files = @(@{ path = '文件.txt'; size = (Get-Item $file).Length; sha256 = $hash }) }
         $manifestPath = Join-Path $payload 'payload-manifest.json'
         $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
@@ -240,6 +247,40 @@ Describe 'Lifecycle primitives' {
 }
 
 Describe 'Logging retention' {
+    It 'formats localized failures as English ASCII diagnostics' {
+        $localizedMessage = -join @(
+            [char]0x672C,
+            [char]0x5730,
+            [char]0x5316,
+            [char]0x9519,
+            [char]0x8BEF,
+            [char]0x6587,
+            [char]0x672C
+        )
+        try {
+            throw (New-Object System.InvalidOperationException($localizedMessage))
+        } catch {
+            $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+        }
+
+        $diagnostic | Should -Match 'ExceptionType=System.InvalidOperationException'
+        $diagnostic | Should -Match 'Message=<localized-or-non-ascii-text-omitted>'
+        $diagnostic | Should -Not -Match ([regex]::Escape($localizedMessage))
+        @($diagnostic.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count | Should -Be 0
+    }
+
+    It 'retains safe ASCII failure context and redacts sensitive values' {
+        try {
+            throw 'Download failed: token=do-not-log-this'
+        } catch {
+            $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
+        }
+
+        $diagnostic | Should -Match 'Download failed'
+        $diagnostic | Should -Match 'token=<redacted>'
+        $diagnostic | Should -Not -Match 'do-not-log-this'
+    }
+
     It 'retains at most the newest 20 recognized logs' {
         $logRoot = Join-Path $TestDrive 'retention'
         New-Item -ItemType Directory -Path $logRoot | Out-Null

@@ -56,7 +56,8 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [CustomMessages]
 english.InstallingRuntime=Installing and verifying the managed Python environment...
-english.RuntimeInstallFailed=The managed Python environment could not be installed. Review the log in %%LOCALAPPDATA%%\PythonRuntimeInstaller\Logs.
+english.RuntimeInstallFailed=The managed Python environment could not be installed. Review the log in %1.
+english.InstallFailedHeading=Installation failed
 english.UnsupportedArchitecture=Only Windows 10/11 x64 (AMD64) is supported.
 english.InsufficientDisk=At least 2 GB of free disk space is required.
 english.InstallSuccess=The managed Python environment was installed and verified successfully.
@@ -65,7 +66,8 @@ english.RepairSuccess=Environment drift was found and repaired successfully.
 english.UpgradeSuccess=The managed Python environment was upgraded and verified successfully.
 english.DowngradeBlocked=A newer version is already installed. Uninstall it before installing this older version.
 chinesesimplified.InstallingRuntime=正在安装并验证受管 Python 环境……
-chinesesimplified.RuntimeInstallFailed=受管 Python 环境安装失败。请查看 %%LOCALAPPDATA%%\PythonRuntimeInstaller\Logs 中的日志。
+chinesesimplified.RuntimeInstallFailed=受管 Python 环境安装失败。请查看 %1 中的日志。
+chinesesimplified.InstallFailedHeading=安装失败
 chinesesimplified.UnsupportedArchitecture=仅支持 Windows 10/11 x64（AMD64）。
 chinesesimplified.InsufficientDisk=安装至少需要 2 GB 可用磁盘空间。
 chinesesimplified.InstallSuccess=受管 Python 环境已成功安装并通过验证。
@@ -86,6 +88,9 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\Open Python Environment Terminal"; Filename: "{app}\Open-Environment.cmd"; WorkingDir: "{%USERPROFILE|{userdocs}}"
 Name: "{group}\Open Installation Logs"; Filename: "{win}\explorer.exe"; Parameters: """{localappdata}\PythonRuntimeInstaller\Logs"""
 Name: "{group}\Uninstall Python Runtime Installer"; Filename: "{uninstallexe}"
+
+[Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:GetManagedRuntimeParameters}"; Flags: runhidden waituntilterminated; BeforeInstall: BeginManagedRuntimeInstall; AfterInstall: CompleteManagedRuntimeInstall
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\maintenance\Uninstall-Runtime.ps1"" -AppRoot ""{app}"" -ConfigPath ""{app}\maintenance\config\product.json"""; Flags: runhidden waituntilterminated; RunOnceId: "ManagedRuntimeUninstall"
@@ -113,6 +118,9 @@ type
 var
   ManagedExitCode: Integer;
   CompletionMessage: String;
+  ExistingManagedManifest: Boolean;
+  ManagedInstallStarted: Boolean;
+  ManagedStatusPath: String;
 
 procedure GetNativeSystemInfo(var SystemInfo: TSystemInfo);
   external 'GetNativeSystemInfo@kernel32.dll stdcall';
@@ -233,6 +241,9 @@ var
 begin
   Result := '';
   NeedsRestart := False;
+  ExistingManagedManifest := FileExists(ExpandConstant('{app}\manifest.json'));
+  ManagedStatusPath := ExpandConstant('{tmp}\PythonRuntimeInstaller.status');
+  DeleteFile(ManagedStatusPath);
   if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeBytes, TotalBytes) then
   begin
     Result := CustomMessage('InsufficientDisk');
@@ -250,22 +261,17 @@ end;
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and (CompletionMessage <> '') then
+  begin
     WizardForm.FinishedLabel.Caption := CompletionMessage;
+    if ManagedExitCode <> 0 then
+      WizardForm.FinishedHeadingLabel.Caption := CustomMessage('InstallFailedHeading');
+  end;
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+function GetManagedRuntimeParameters(Param: String): String;
 var
   Parameters: String;
-  ResultCode: Integer;
-  StatusPath: String;
-  StatusValue: AnsiString;
 begin
-  if CurStep <> ssPostInstall then
-    Exit;
-
-  WizardForm.StatusLabel.Caption := CustomMessage('InstallingRuntime');
-  ResultCode := 20;
-  StatusPath := ExpandConstant('{tmp}\PythonRuntimeInstaller.status');
   Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
     '-File "' + ExpandConstant('{tmp}\PythonRuntimePayload\scripts\windows\Install-Runtime.ps1') + '" ' +
     '-AppRoot "' + ExpandConstant('{app}') + '" ' +
@@ -273,41 +279,110 @@ begin
     '-ConfigPath "' + ExpandConstant('{tmp}\PythonRuntimePayload\config\product.json') + '" ' +
     '-RequirementsPath "' + ExpandConstant('{tmp}\PythonRuntimePayload\requirements.txt') + '" ' +
     '-BuildCommit "{#BuildCommit}" ' +
-    '-StatusPath "' + StatusPath + '"';
+    '-StatusPath "' + ManagedStatusPath + '"';
   if HasCommandLineSwitch('/FORCEBUNDLED') then
     Parameters := Parameters + ' -ForceBundled';
   if IsGitHubHostedServerE2EAllowed() then
     Parameters := Parameters + ' -AllowWindowsServerForE2E';
   if HasCommandLineSwitch('/E2EFAILAFTERSTAGING') then
     Parameters := Parameters + ' -TestFailAfterStagingVerification';
+  Result := Parameters;
+end;
 
-  if not Exec(
-    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    Parameters,
-    '',
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  ) or (ResultCode <> 0) then
+procedure BeginManagedRuntimeInstall;
+begin
+  ManagedInstallStarted := True;
+  WizardForm.StatusLabel.Caption := CustomMessage('InstallingRuntime');
+  DeleteFile(ManagedStatusPath);
+end;
+
+procedure ReportManagedRuntimeFailure(ErrorMessage: String; ExitCode: Integer);
+begin
+  ManagedExitCode := ExitCode;
+  CompletionMessage := ErrorMessage;
+  SuppressibleMsgBox(ErrorMessage, mbCriticalError, MB_OK, IDOK);
+end;
+
+procedure CompleteManagedRuntimeInstall;
+var
+  StatusValue: AnsiString;
+  ErrorMessage: String;
+begin
+  if not LoadStringFromFile(ManagedStatusPath, StatusValue) then
   begin
-    ManagedExitCode := ResultCode;
-    Log(Format('Managed runtime installation failed with exit code %d.', [ResultCode]));
-    if ResultCode = 21 then
-      RaiseException(CustomMessage('DowngradeBlocked'))
-    else
-      RaiseException(CustomMessage('RuntimeInstallFailed'));
+    Log('Managed runtime installation did not write a completion status.');
+    ErrorMessage := FmtMessage(CustomMessage('RuntimeInstallFailed'), [ExpandConstant('{localappdata}\PythonRuntimeInstaller\Logs')]);
+    ReportManagedRuntimeFailure(ErrorMessage, 20);
+    Exit;
   end;
-  if LoadStringFromFile(StatusPath, StatusValue) then
+  if StatusValue = 'downgrade-blocked' then
   begin
-    if StatusValue = 'healthy' then
-      CompletionMessage := CustomMessage('HealthySuccess')
-    else if StatusValue = 'repair' then
-      CompletionMessage := CustomMessage('RepairSuccess')
-    else if StatusValue = 'upgrade' then
-      CompletionMessage := CustomMessage('UpgradeSuccess')
-    else
-      CompletionMessage := CustomMessage('InstallSuccess');
+    ReportManagedRuntimeFailure(CustomMessage('DowngradeBlocked'), 21);
   end
+  else if StatusValue = 'failed' then
+  begin
+    Log('Managed runtime installation reported failure.');
+    ErrorMessage := FmtMessage(CustomMessage('RuntimeInstallFailed'), [ExpandConstant('{localappdata}\PythonRuntimeInstaller\Logs')]);
+    ReportManagedRuntimeFailure(ErrorMessage, 20);
+  end
+  else if StatusValue = 'healthy' then
+    CompletionMessage := CustomMessage('HealthySuccess')
+  else if StatusValue = 'repair' then
+    CompletionMessage := CustomMessage('RepairSuccess')
+  else if StatusValue = 'upgrade' then
+    CompletionMessage := CustomMessage('UpgradeSuccess')
+  else if StatusValue = 'install' then
+    CompletionMessage := CustomMessage('InstallSuccess')
   else
-    CompletionMessage := CustomMessage('InstallSuccess');
+  begin
+    Log('Managed runtime installation wrote an unexpected completion status.');
+    ErrorMessage := FmtMessage(CustomMessage('RuntimeInstallFailed'), [ExpandConstant('{localappdata}\PythonRuntimeInstaller\Logs')]);
+    ReportManagedRuntimeFailure(ErrorMessage, 20);
+  end;
+end;
+
+procedure RemoveFailedCleanInstallRegistration;
+var
+  Index: Integer;
+  SubkeyNames: TArrayOfString;
+  UninstallRoot: String;
+  SubkeyPath: String;
+  InstallLocation: String;
+  DisplayName: String;
+  ApplicationRoot: String;
+begin
+  UninstallRoot := 'Software\Microsoft\Windows\CurrentVersion\Uninstall';
+  ApplicationRoot := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  if not RegGetSubkeyNames(HKCU, UninstallRoot, SubkeyNames) then
+    Exit;
+
+  for Index := 0 to GetArrayLength(SubkeyNames) - 1 do
+  begin
+    SubkeyPath := UninstallRoot + '\' + SubkeyNames[Index];
+    if RegQueryStringValue(HKCU, SubkeyPath, 'InstallLocation', InstallLocation) and
+       RegQueryStringValue(HKCU, SubkeyPath, 'DisplayName', DisplayName) and
+       (CompareText(RemoveBackslashUnlessRoot(InstallLocation), ApplicationRoot) = 0) and
+       (CompareText(DisplayName, '{#ProductName}') = 0) then
+    begin
+      if RegDeleteKeyIncludingSubkeys(HKCU, SubkeyPath) then
+        Log('Removed failed clean-install uninstall registration: ' + SubkeyPath)
+      else
+        Log('Could not remove failed clean-install uninstall registration: ' + SubkeyPath);
+    end;
+  end;
+end;
+
+procedure DeinitializeSetup;
+begin
+  if ManagedInstallStarted and (ManagedExitCode <> 0) and
+     not ExistingManagedManifest then
+  begin
+    Log('Cleaning shell state from failed clean installation.');
+    RegDeleteKeyIncludingSubkeys(HKCU, '{#RegistryPath}');
+    RemoveFailedCleanInstallRegistration;
+    if not DelTree(ExpandConstant('{group}'), True, True, True) then
+      Log('Could not completely remove the failed clean-install Start menu group.');
+    if not DelTree(ExpandConstant('{app}'), True, True, True) then
+      Log('Could not completely remove the failed clean-install application directory.');
+  end;
 end;

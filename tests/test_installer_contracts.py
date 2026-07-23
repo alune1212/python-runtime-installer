@@ -42,6 +42,13 @@ def test_private_runtime_never_changes_path_or_machine_scope() -> None:
     assert "setx" not in module.lower()
 
 
+def test_target_hashing_does_not_depend_on_powershell_module_autoload() -> None:
+    module = read("scripts/windows/RuntimeInstaller.psm1")
+    assert "Get-FileHash" not in module
+    assert "[System.Security.Cryptography.SHA256]::Create()" in module
+    assert "[System.IO.File]::OpenRead($Path)" in module
+
+
 def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> None:
     project = read("installer/python-runtime-installer.iss")
     for required in (
@@ -61,6 +68,39 @@ def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> Non
     assert "{commondesktop}" not in project
     assert "{userdesktop}" not in project
     assert "{userprofile}" not in project
+
+
+def test_failed_clean_install_removes_only_new_shell_state_and_expands_log_path() -> None:
+    project = read("installer/python-runtime-installer.iss")
+    for required in (
+        "english.RuntimeInstallFailed="
+        "The managed Python environment could not be installed. Review the log in %1.",
+        "chinesesimplified.RuntimeInstallFailed=受管 Python 环境安装失败。请查看 %1 中的日志。",
+        "procedure ReportManagedRuntimeFailure(ErrorMessage: String; ExitCode: Integer);",
+        "SuppressibleMsgBox(ErrorMessage, mbCriticalError, MB_OK, IDOK);",
+        "WizardForm.FinishedHeadingLabel.Caption := CustomMessage('InstallFailedHeading');",
+        "FmtMessage(",
+        "ExistingManagedManifest := FileExists(ExpandConstant('{app}\\manifest.json'));",
+        "ManagedInstallStarted := True;",
+        "procedure RemoveFailedCleanInstallRegistration;",
+        "procedure DeinitializeSetup;",
+        "ManagedInstallStarted and (ManagedExitCode <> 0) and",
+        "not ExistingManagedManifest",
+        "RegDeleteKeyIncludingSubkeys(HKCU, '{#RegistryPath}');",
+        "RegQueryStringValue(HKCU, SubkeyPath, 'InstallLocation', InstallLocation)",
+        "(CompareText(DisplayName, '{#ProductName}') = 0)",
+        "DelTree(ExpandConstant('{group}'), True, True, True)",
+        "DelTree(ExpandConstant('{app}'), True, True, True)",
+    ):
+        assert required in project
+    assert "%%LOCALAPPDATA%%" not in project
+    assert "[Run]" in project
+    assert 'Parameters: "{code:GetManagedRuntimeParameters}"' in project
+    assert "BeforeInstall: BeginManagedRuntimeInstall" in project
+    assert "AfterInstall: CompleteManagedRuntimeInstall" in project
+    assert "procedure CurStepChanged" not in project
+    assert "if not Exec(" not in project
+    assert "RaiseException(" not in project
 
 
 def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
