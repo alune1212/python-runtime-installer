@@ -93,4 +93,4 @@
 - [x] 10.3 Document optional code-signing secrets, unsigned-build behavior, release gates, SBOM/checksum verification, vulnerability exceptions, and third-party redistribution obligations.
 - [x] 10.4 Document that target installation is fully offline, explain why no package mirror is configured, and provide checksum-based guidance for internal or domestic redistribution of the GitHub artifact.
 - [x] 10.5 Add a real-device acceptance checklist for Windows 10 x64 and Windows 11 x64 covering interactive install, silent install, no-admin behavior, Chinese paths, repair, upgrade, uninstall, and SmartScreen/signature state.
-- [ ] 10.6 Validate the complete repository with local checks, a manually dispatched Windows full build, strict OpenSpec validation, and clean diff checks before tagging `v0.1.0`.
+- [x] 10.6 Validate the complete repository with local checks, a manually dispatched Windows full build, strict OpenSpec validation, and clean diff checks before tagging `v0.1.0`.
