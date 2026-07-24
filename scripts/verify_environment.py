@@ -139,6 +139,30 @@ def verify_immutable_distribution_set(
         )
 
 
+_WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_FILENAMES = frozenset(
+    {
+        "AUX",
+        "CON",
+        "NUL",
+        "PRN",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+    }
+)
+
+
+def _is_safe_entrypoint_name(name: str) -> bool:
+    if not name or name in {".", ".."} or name[-1] in {" ", "."}:
+        return False
+    if any(
+        ord(character) < 32 or character in _WINDOWS_INVALID_FILENAME_CHARACTERS
+        for character in name
+    ):
+        return False
+    return name.split(".", maxsplit=1)[0].upper() not in _WINDOWS_RESERVED_FILENAMES
+
+
 def _entrypoint_launchers() -> list[tuple[str, Path]]:
     console_target = Path(sys.executable)
     gui_target = console_target.with_name("pythonw.exe")
@@ -150,7 +174,7 @@ def _entrypoint_launchers() -> list[tuple[str, Path]]:
             if entry_point.group not in {"console_scripts", "gui_scripts"}:
                 continue
             name = entry_point.name
-            if not name or Path(name).name != name:
+            if not _is_safe_entrypoint_name(name):
                 raise VerificationError(f"Unsafe command entry-point name: {name!r}")
             target = console_target if entry_point.group == "console_scripts" else gui_target
             existing_target = launchers.get(name)

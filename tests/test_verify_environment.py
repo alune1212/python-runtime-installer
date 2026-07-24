@@ -179,17 +179,22 @@ def test_entrypoint_launchers_include_pip_variants_and_gui_target(
     assert launchers["gui-tool"] == executable.with_name("pythonw.exe")
 
 
+@pytest.mark.parametrize(
+    "unsafe_name",
+    ["..\\unsafe", "../unsafe", "C:unsafe", "unsafe.", "NUL"],
+)
 def test_entrypoint_launcher_rejects_unsafe_name(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unsafe_name: str
 ) -> None:
     class EntryPoint:
-        name = "..\\unsafe"
-        group = "console_scripts"
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.group = "console_scripts"
 
     class Distribution:
         def __init__(self) -> None:
             self.metadata = {"Name": "unsafe-tool"}
-            self.entry_points = [EntryPoint()]
+            self.entry_points = [EntryPoint(unsafe_name)]
 
     monkeypatch.setattr(verifier.importlib.metadata, "distributions", lambda: [Distribution()])
     with pytest.raises(verifier.VerificationError, match="Unsafe"):
