@@ -95,6 +95,8 @@ $compiler = .\scripts\build\Install-InnoSetup.ps1
 
 ## 用户安装和使用
 
+面向普通用户的逐步说明见 [用户使用指南](docs/user-guide.md)。
+
 交互安装：双击 `.exe`，选择中文或英文并完成向导。启动环境时使用开始菜单中的 “Open Python Environment Terminal”；该入口只为当前终端激活受管 `venv`。
 
 静默安装：
