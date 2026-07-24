@@ -117,7 +117,7 @@ def test_failed_clean_install_removes_only_new_shell_state_and_expands_log_path(
     assert "StartsWith('PIP_'" in runtime
     assert "Invoke-OwnedDirectoryCleanup" in read("scripts/windows/Install-Runtime.ps1")
     assert "ProgressCleanup" in project
-    assert "GetManagedRuntimeParameters('')" in project
+    assert "GetManagedRuntimeParameters" in project
     assert "BeforeInstall: RunManagedRuntimeInstall" in project
     assert "AfterInstall: CompleteManagedRuntimeInstall" in project
     assert "procedure CurStepChanged" not in project
@@ -132,7 +132,7 @@ def test_inno_build_tool_install_is_portable_and_user_scoped() -> None:
         "/PORTABLE=1",
         "/NOICONS",
         "chinese_translation",
-        "translation hash mismatch",
+        "Get-VerifiedDownload",
     ):
         assert required in script
 

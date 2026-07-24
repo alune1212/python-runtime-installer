@@ -11,19 +11,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+DESKTOP_PLATFORMS = ("windows_10_x64", "windows_11_x64")
+
 
 def validate_acceptance(product_version: str, record: dict[str, object]) -> list[str]:
     errors: list[str] = []
     if record.get("schema_version") != 1:
         errors.append("desktop acceptance schema_version must be 1")
-    platforms = ("windows_10_x64", "windows_11_x64")
-    for platform_name in platforms:
+    for platform_name in DESKTOP_PLATFORMS:
         value = record.get(platform_name)
         if not isinstance(value, dict):
             errors.append(f"desktop acceptance record is missing {platform_name}")
     if int(product_version.split(".", 1)[0]) < 1:
         return errors
-    for platform_name in platforms:
+    for platform_name in DESKTOP_PLATFORMS:
         value = record.get(platform_name)
         if not isinstance(value, dict):
             continue
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         record = json.loads(args.record.read_text(encoding="utf-8"))
         errors = validate_acceptance(product["product"]["version"], record)
         if int(product["product"]["version"].split(".", 1)[0]) >= 1:
-            for platform_name in ("windows_10_x64", "windows_11_x64"):
+            for platform_name in DESKTOP_PLATFORMS:
                 platform_record = record.get(platform_name)
                 if not isinstance(platform_record, dict):
                     continue

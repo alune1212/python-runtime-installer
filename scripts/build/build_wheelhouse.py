@@ -20,10 +20,8 @@ def verify_wheelhouse(lock_path: Path, wheelhouse: Path) -> list[str]:
     missing: list[str] = []
     for item in locked:
         prefix = f"{item.canonical_name.replace('-', '_')}-{item.version}".lower()
-        normalized_version_prefix = prefix.replace("-", "_")
         if not any(
-            wheel.startswith(prefix)
-            or wheel.replace("-", "_").startswith(normalized_version_prefix)
+            wheel.startswith(prefix) or wheel.replace("-", "_").startswith(prefix)
             for wheel in wheels
         ):
             missing.append(f"{item.canonical_name}=={item.version}")

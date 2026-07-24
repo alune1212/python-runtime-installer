@@ -25,7 +25,7 @@ def test_committed_configuration_and_direct_requirements_are_valid(
 ) -> None:
     validate_product_config(config, "v0.1.0")
     assert set(read_direct_requirements()) == EXPECTED_DIRECT_REQUIREMENTS
-    assert len(read_direct_requirements()) == 14
+    assert len(read_direct_requirements()) == len(EXPECTED_DIRECT_REQUIREMENTS)
 
 
 @pytest.mark.parametrize(

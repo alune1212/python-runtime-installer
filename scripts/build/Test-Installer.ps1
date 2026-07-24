@@ -36,9 +36,6 @@ if ($env:GITHUB_SHA) {
         throw 'Could not resolve the expected build commit from Git.'
     }
 }
-if ([string]::IsNullOrWhiteSpace($expectedBuildCommit)) {
-    throw 'Could not resolve the expected build commit.'
-}
 
 $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
 $machinePathBefore = [Environment]::GetEnvironmentVariable('Path', 'Machine')

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
-import re
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -15,15 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.build.requirements_lock import LockedRequirement, read_lock  # noqa: E402
+from scripts.build.requirements_lock import (  # noqa: E402
+    LockedRequirement,
+    canonicalize_name,
+    read_lock,
+)
 
 
 class EntrypointSelectionError(RuntimeError):
     """Raised when installed entry points cannot be mapped to the offline locks."""
-
-
-def _canonical_name(value: str) -> str:
-    return re.sub(r"[-_.]+", "-", value).lower()
 
 
 def entrypoint_distribution_names(
@@ -40,7 +39,7 @@ def entrypoint_distribution_names(
         name = distribution.metadata.get("Name")
         if not name:
             raise EntrypointSelectionError("Installed entry-point distribution has no Name")
-        selected.add(_canonical_name(name))
+        selected.add(canonicalize_name(name))
     if not selected:
         raise EntrypointSelectionError("No installed command entry points were found")
     return selected

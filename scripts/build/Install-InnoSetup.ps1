@@ -3,23 +3,18 @@ param([string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..'))
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_VerifiedDownload.ps1')
 $config = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'config\product.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $toolRoot = Join-Path $RepositoryRoot 'build\tools'
 $innoRoot = Join-Path $toolRoot 'inno'
 $installer = Join-Path $toolRoot ([string]$config.build.inno_setup.filename)
 [System.IO.Directory]::CreateDirectory($toolRoot) | Out-Null
 
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri ([string]$config.build.inno_setup.url) -OutFile $installer -UseBasicParsing
-$actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne [string]$config.build.inno_setup.sha256) {
-    throw "Inno Setup hash mismatch: expected=$($config.build.inno_setup.sha256) actual=$actual"
-}
-$signature = Get-AuthenticodeSignature -LiteralPath $installer
-$subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
-if ($signature.Status -ne 'Valid' -or -not $subject.Contains([string]$config.build.inno_setup.expected_publisher)) {
-    throw "Inno Setup signature verification failed: status=$($signature.Status) subject=$subject"
-}
+Get-VerifiedDownload `
+    -Uri ([string]$config.build.inno_setup.url) `
+    -Destination $installer `
+    -ExpectedSha256 ([string]$config.build.inno_setup.sha256) `
+    -ExpectedPublisher ([string]$config.build.inno_setup.expected_publisher)
 $process = Start-Process -FilePath $installer -ArgumentList @(
     '/VERYSILENT',
     '/SUPPRESSMSGBOXES',
@@ -41,9 +36,8 @@ $translation = $config.build.inno_setup.chinese_translation
 $translationDirectory = Join-Path $innoRoot 'Languages'
 [System.IO.Directory]::CreateDirectory($translationDirectory) | Out-Null
 $translationPath = Join-Path $translationDirectory ([string]$translation.filename)
-Invoke-WebRequest -Uri ([string]$translation.url) -OutFile $translationPath -UseBasicParsing
-$translationHash = (Get-FileHash -LiteralPath $translationPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($translationHash -ne [string]$translation.sha256) {
-    throw "Inno Setup translation hash mismatch: expected=$($translation.sha256) actual=$translationHash"
-}
+Get-VerifiedDownload `
+    -Uri ([string]$translation.url) `
+    -Destination $translationPath `
+    -ExpectedSha256 ([string]$translation.sha256)
 Write-Output $compiler

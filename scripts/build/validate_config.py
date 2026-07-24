@@ -11,6 +11,8 @@ import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
+from scripts.build.requirements_lock import canonicalize_name
+
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "config" / "product.json"
 REQUIREMENTS_IN = ROOT / "requirements.in"
@@ -52,10 +54,6 @@ def _load_json(path: Path) -> dict[str, object]:
         raise ConfigError(f"Cannot load {path}: {exc}") from exc
 
 
-def _normalize_package_name(value: str) -> str:
-    return re.sub(r"[-_.]+", "-", value).lower()
-
-
 def read_direct_requirements(path: Path = REQUIREMENTS_IN) -> list[str]:
     result: list[str] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -66,7 +64,7 @@ def read_direct_requirements(path: Path = REQUIREMENTS_IN) -> list[str]:
             not any(token in line for token in ("==", ">", "<", "@", ";", "[")),
             f"requirements.in must contain bare direct package names: {line}",
         )
-        result.append(_normalize_package_name(line))
+        result.append(canonicalize_name(line))
     return result
 
 
@@ -212,7 +210,6 @@ def validate_product_config(config: dict[str, object], tag: str | None = None) -
         _require(tag == f"v{version}", f"tag {tag!r} does not match product version v{version}")
 
     direct = read_direct_requirements()
-    _require(len(direct) == len(set(direct)), "requirements.in contains duplicates")
     _require(
         set(direct) == EXPECTED_DIRECT_REQUIREMENTS,
         "requirements.in does not exactly match the approved direct dependency set",

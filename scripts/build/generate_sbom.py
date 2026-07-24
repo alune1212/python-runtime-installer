@@ -9,10 +9,26 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from scripts.build.requirements_lock import read_lock
+from scripts.build.requirements_lock import LockedRequirement, read_lock
 
 ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = uuid.UUID("4fb8d7be-3930-48bb-a40d-7d21d02dcf51")
+
+
+def _library_component(
+    item: "LockedRequirement", scope: str | None = None
+) -> dict[str, object]:
+    purl = f"pkg:pypi/{item.canonical_name}@{item.version}"
+    component: dict[str, object] = {
+        "type": "library",
+        "bom-ref": f"{purl}?scope={scope}" if scope else purl,
+        "name": item.canonical_name,
+        "version": item.version,
+        "purl": purl,
+    }
+    if scope:
+        component["properties"] = [{"name": "installer:scope", "value": scope}]
+    return component
 
 
 def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[str, object]:
@@ -21,14 +37,19 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
     python_version = config["target"]["python"]["version"]
     inno = config["build"]["inno_setup"]
     translation = inno["chinese_translation"]
+    inno_purl = f"pkg:github/jrsoftware/issrc@{inno['version']}"
+    translation_purl = (
+        "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
+        + translation["commit"]
+    )
+    root_component: dict[str, object] = {
+        "type": "application",
+        "bom-ref": "pkg:generic/python-runtime-installer@" + version,
+        "name": "Python Runtime Installer",
+        "version": version,
+        "purl": "pkg:generic/python-runtime-installer@" + version,
+    }
     components: list[dict[str, object]] = [
-        {
-            "type": "application",
-            "bom-ref": "pkg:generic/python-runtime-installer@" + version,
-            "name": "Python Runtime Installer",
-            "version": version,
-            "purl": "pkg:generic/python-runtime-installer@" + version,
-        },
         {
             "type": "platform",
             "bom-ref": "pkg:generic/cpython@" + python_version,
@@ -38,50 +59,33 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
         },
         {
             "type": "framework",
-            "bom-ref": f"pkg:github/jrsoftware/issrc@{inno['version']}",
+            "bom-ref": inno_purl,
             "name": "Inno Setup",
             "version": inno["version"],
-            "purl": f"pkg:github/jrsoftware/issrc@{inno['version']}",
+            "purl": inno_purl,
             "hashes": [{"alg": "SHA-256", "content": inno["sha256"]}],
         },
         {
             "type": "data",
-            "bom-ref": (
-                "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
-                + translation["commit"]
-            ),
+            "bom-ref": translation_purl,
             "name": "Inno Setup Chinese Simplified Translation",
             "version": translation["version"],
-            "purl": (
-                "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
-                + translation["commit"]
-            ),
+            "purl": translation_purl,
             "hashes": [{"alg": "SHA-256", "content": translation["sha256"]}],
             "properties": [{"name": "source:git-commit", "value": translation["commit"]}],
         },
     ]
-    for item in sorted(read_lock(lock_path), key=lambda value: value.canonical_name):
-        components.append(
-            {
-                "type": "library",
-                "bom-ref": f"pkg:pypi/{item.canonical_name}@{item.version}",
-                "name": item.canonical_name,
-                "version": item.version,
-                "purl": f"pkg:pypi/{item.canonical_name}@{item.version}",
-            }
-        )
+    components.extend(
+        _library_component(item)
+        for item in sorted(read_lock(lock_path), key=lambda value: value.canonical_name)
+    )
     if bootstrap_lock_path:
-        for item in sorted(read_lock(bootstrap_lock_path), key=lambda value: value.canonical_name):
-            components.append(
-                {
-                    "type": "library",
-                    "bom-ref": f"pkg:pypi/{item.canonical_name}@{item.version}?scope=bootstrap",
-                    "name": item.canonical_name,
-                    "version": item.version,
-                    "purl": f"pkg:pypi/{item.canonical_name}@{item.version}",
-                    "properties": [{"name": "installer:scope", "value": "bootstrap"}],
-                }
+        components.extend(
+            _library_component(item, scope="bootstrap")
+            for item in sorted(
+                read_lock(bootstrap_lock_path), key=lambda value: value.canonical_name
             )
+        )
     serial = uuid.uuid5(NAMESPACE, f"{version}:cp{python_version}:win_amd64")
     return {
         "bomFormat": "CycloneDX",
@@ -90,13 +94,13 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
         "version": 1,
         "metadata": {
             "timestamp": datetime.now(UTC).isoformat(),
-            "component": components[0],
+            "component": root_component,
             "properties": [
                 {"name": "installer:target", "value": "cp313-win_amd64"},
                 {"name": "installer:lock", "value": lock_path.name},
             ],
         },
-        "components": components[1:],
+        "components": components,
     }
 
 

@@ -62,18 +62,21 @@ def main(argv: list[str] | None = None) -> int:
         / str(translation["filename"]),
     ]
     errors = [f"missing release artifact: {path}" for path in required if not path.is_file()]
-    evidence_hashes = {
-        args.release_dir / "licenses" / "inno-setup" / "LICENSE.txt": inno["license_sha256"],
-        args.release_dir
-        / "licenses"
-        / "inno-setup-chinese-translation"
-        / "LICENSE.txt": translation["license_sha256"],
-        args.release_dir
-        / "sources"
-        / "inno-setup-chinese-translation"
-        / str(translation["filename"]): translation["sha256"],
-    }
-    for path, expected_hash in evidence_hashes.items():
+    evidence_hash_items = [
+        (args.release_dir / "licenses" / "inno-setup" / "LICENSE.txt", inno["license_sha256"]),
+        (
+            args.release_dir / "licenses" / "inno-setup-chinese-translation" / "LICENSE.txt",
+            translation["license_sha256"],
+        ),
+        (
+            args.release_dir
+            / "sources"
+            / "inno-setup-chinese-translation"
+            / str(translation["filename"]),
+            translation["sha256"],
+        ),
+    ]
+    for path, expected_hash in evidence_hash_items:
         if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
             errors.append(f"{path.name}: evidence hash does not match pinned configuration")
     secret_values = [

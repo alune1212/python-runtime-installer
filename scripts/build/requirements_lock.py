@@ -10,6 +10,11 @@ HASH_RE = re.compile(r"--hash=sha256:([0-9a-f]{64})(?:\s|$)")
 PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)(.*)$")
 
 
+def canonicalize_name(value: str) -> str:
+    """Return the PEP 503 canonical form of *value*."""
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
 class LockError(ValueError):
     """Raised when requirements.txt is not an immutable hash lock."""
 
@@ -22,7 +27,7 @@ class LockedRequirement:
 
     @property
     def canonical_name(self) -> str:
-        return re.sub(r"[-_.]+", "-", self.name).lower()
+        return canonicalize_name(self.name)
 
 
 def _logical_lines(path: Path) -> list[str]:

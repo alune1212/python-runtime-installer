@@ -303,7 +303,7 @@ begin
   end;
 end;
 
-function GetManagedRuntimeParameters(Param: String): String;
+function GetManagedRuntimeParameters: String;
 var
   Parameters: String;
 begin
@@ -467,7 +467,7 @@ begin
   try
     if not ExecAndLogOutput(
       ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-      GetManagedRuntimeParameters(''),
+      GetManagedRuntimeParameters,
       '',
       SW_SHOWNORMAL,
       ewWaitUntilTerminated,

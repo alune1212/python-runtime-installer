@@ -9,7 +9,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import re
 import subprocess
 import sys
 import tempfile
@@ -22,7 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.build.requirements_lock import LockError, locked_versions  # noqa: E402
+from scripts.build.requirements_lock import (  # noqa: E402
+    LockError,
+    canonicalize_name,
+    locked_versions,
+)
 
 IMPORT_NAMES = {
     "beautifulsoup4": "bs4",
@@ -56,8 +59,9 @@ def verify_runtime(expected_python: str, expected_executable: str | None) -> Non
             "Python version mismatch: "
             f"expected={expected_python} actual={platform.python_version()}"
         )
-    if platform.architecture()[0] != "64bit":
-        raise VerificationError(f"Python architecture is not 64bit: {platform.architecture()[0]}")
+    architecture = platform.architecture()[0]
+    if architecture != "64bit":
+        raise VerificationError(f"Python architecture is not 64bit: {architecture}")
     if sys.implementation.name != "cpython":
         raise VerificationError(f"Python implementation is not CPython: {sys.implementation.name}")
     if sys.prefix == sys.base_prefix:
@@ -70,20 +74,28 @@ def verify_runtime(expected_python: str, expected_executable: str | None) -> Non
         )
 
 
-def verify_packages(requirements: Path) -> dict[str, str]:
+def _verify_locked_requirements(
+    requirements: Path, missing_label: str, mismatch_label: str
+) -> dict[str, str]:
     expected = locked_versions(requirements)
     installed: dict[str, str] = {}
     for name, expected_version in sorted(expected.items()):
         try:
             actual_version = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError as exc:
-            raise VerificationError(f"Locked package is not installed: {name}") from exc
+            raise VerificationError(f"{missing_label} package is not installed: {name}") from exc
         if actual_version != expected_version:
             raise VerificationError(
-                f"Package version mismatch: {name} "
+                f"{mismatch_label} version mismatch: {name} "
                 f"expected={expected_version} actual={actual_version}"
             )
         installed[name] = actual_version
+    return installed
+
+
+def verify_packages(requirements: Path) -> dict[str, str]:
+    installed = _verify_locked_requirements(requirements, "Locked", "Package")
+    expected = locked_versions(requirements)
     for package, module in IMPORT_NAMES.items():
         if package not in expected:
             raise VerificationError(f"Required direct package missing from lock: {package}")
@@ -106,20 +118,7 @@ def verify_packages(requirements: Path) -> dict[str, str]:
 
 
 def verify_bootstrap(requirements: Path) -> dict[str, str]:
-    expected = locked_versions(requirements)
-    installed: dict[str, str] = {}
-    for name, expected_version in sorted(expected.items()):
-        try:
-            actual_version = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError as exc:
-            raise VerificationError(f"Bootstrap package is not installed: {name}") from exc
-        if actual_version != expected_version:
-            raise VerificationError(
-                f"Bootstrap version mismatch: {name} "
-                f"expected={expected_version} actual={actual_version}"
-            )
-        installed[name] = actual_version
-    return installed
+    return _verify_locked_requirements(requirements, "Bootstrap", "Bootstrap")
 
 
 def verify_immutable_distribution_set(
@@ -127,7 +126,7 @@ def verify_immutable_distribution_set(
 ) -> None:
     expected = set(packages) | set(bootstrap_tooling)
     actual = {
-        re.sub(r"[-_.]+", "-", name).lower()
+        canonicalize_name(name)
         for distribution in importlib.metadata.distributions()
         if (name := distribution.metadata.get("Name"))
     }
@@ -169,7 +168,7 @@ def _entrypoint_launchers() -> list[tuple[str, Path]]:
     launchers: dict[str, Path] = {}
     for distribution in importlib.metadata.distributions():
         distribution_name = distribution.metadata.get("Name", "")
-        canonical_distribution = re.sub(r"[-_.]+", "-", distribution_name).lower()
+        canonical_distribution = canonicalize_name(distribution_name)
         for entry_point in distribution.entry_points:
             if entry_point.group not in {"console_scripts", "gui_scripts"}:
                 continue

@@ -3,6 +3,13 @@ $ErrorActionPreference = 'Stop'
 
 $script:InstallerLogPath = $null
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$script:DiscoveryRegistryValueNames = @(
+    'InstallPath',
+    'PythonExecutable',
+    'PythonVersion',
+    'InstallerVersion',
+    'ManifestPath',
+)
 
 function Initialize-InstallerLog {
     [CmdletBinding()]
@@ -686,7 +693,7 @@ function Publish-DiscoveryRegistration {
         InstallerVersion = $InstallerVersion
         ManifestPath = $ManifestPath
     }
-    foreach ($name in $values.Keys) {
+    foreach ($name in $script:DiscoveryRegistryValueNames) {
         New-ItemProperty -Path $key -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null
     }
 }
@@ -700,7 +707,7 @@ function Get-DiscoveryMetadataSnapshot {
     }
     $item = Get-ItemProperty -LiteralPath $key
     $values = @{}
-    foreach ($name in @('InstallPath', 'PythonExecutable', 'PythonVersion', 'InstallerVersion', 'ManifestPath')) {
+    foreach ($name in $script:DiscoveryRegistryValueNames) {
         $property = $item.PSObject.Properties[$name]
         if ($property) {
             $values[$name] = [string]$property.Value

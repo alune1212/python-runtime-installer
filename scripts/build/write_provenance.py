@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     config = json.loads((ROOT / "config" / "product.json").read_text(encoding="utf-8"))
+    translation = config["build"]["inno_setup"]["chinese_translation"]
     provenance = {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -29,15 +30,9 @@ def main(argv: list[str] | None = None) -> int:
         "uv_version": config["build"]["uv_version"],
         "inno_setup_version": config["build"]["inno_setup"]["version"],
         "inno_setup_sha256": config["build"]["inno_setup"]["sha256"],
-        "inno_setup_translation_version": config["build"]["inno_setup"]["chinese_translation"][
-            "version"
-        ],
-        "inno_setup_translation_commit": config["build"]["inno_setup"]["chinese_translation"][
-            "commit"
-        ],
-        "inno_setup_translation_sha256": config["build"]["inno_setup"]["chinese_translation"][
-            "sha256"
-        ],
+        "inno_setup_translation_version": translation["version"],
+        "inno_setup_translation_commit": translation["commit"],
+        "inno_setup_translation_sha256": translation["sha256"],
         "git_commit": os.environ.get("GITHUB_SHA", "local"),
         "github_repository": os.environ.get(
             "GITHUB_REPOSITORY", "alune1212/python-runtime-installer"
