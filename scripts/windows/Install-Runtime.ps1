@@ -40,6 +40,27 @@ function Write-InstallStatus([string]$Value, [string]$Path) {
     }
 }
 
+function Write-InstallProgress([string]$Stage) {
+    [Console]::Out.WriteLine("PYRUNTIME_PROGRESS|{0}" -f $Stage)
+    [Console]::Out.Flush()
+}
+
+function Invoke-OwnedDirectoryCleanup([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $cleanupScriptPath = Join-Path $PayloadRoot 'scripts\windows\Remove-OwnedDirectory.ps1'
+    Invoke-LoggedProcess -FilePath (Join-Path $PSHOME 'powershell.exe') -Arguments @(
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $cleanupScriptPath,
+        '-AppRoot', $AppRoot,
+        '-Path', $Path
+    ) -Stage 'cleanup' -EmitHeartbeat | Out-Null
+}
+
 try {
     $config = Get-ProductConfig -ConfigPath $ConfigPath
     $incomingVersion = [string]$config.product.version
@@ -49,14 +70,17 @@ try {
     $manifestPath = Join-Path $AppRoot 'manifest.json'
     $payloadManifestPath = Join-Path $PayloadRoot 'payload-manifest.json'
     $verifierPath = Join-Path $PayloadRoot 'scripts\verify_environment.py'
+    $entrypointSelectorPath = Join-Path $PayloadRoot 'scripts\select_entrypoint_requirements.py'
     $bootstrapRequirementsPath = Join-Path $PayloadRoot 'bootstrap-requirements.txt'
     $pythonInstallerPath = Join-Path $PayloadRoot ([string]$config.target.python.filename)
     $discoverySnapshot = Get-DiscoveryMetadataSnapshot -RegistryPath ([string]$config.product.registry_path)
 
+    Write-InstallProgress -Stage 'preflight'
     Assert-WindowsPreflight `
         -AppRoot $AppRoot `
         -MinimumFreeBytes ([Int64]$config.target.minimum_free_bytes) `
         -AllowWindowsServerForE2E:$AllowWindowsServerForE2E
+    Write-InstallProgress -Stage 'integrity'
     $payloadManifest = Test-PayloadManifest -PayloadRoot $PayloadRoot -ManifestPath $payloadManifestPath
 
     $installedManifest = $null
@@ -71,6 +95,7 @@ try {
         }
         if ($versionComparison -eq 0 -and (Test-Path -LiteralPath $activePython -PathType Leaf) -and -not $TestFailAfterStagingVerification) {
             try {
+                Write-InstallProgress -Stage 'repair-check'
                 Invoke-LoggedProcess -FilePath $activePython -Arguments @(
                     $verifierPath,
                     '--requirements', $RequirementsPath,
@@ -78,9 +103,10 @@ try {
                     '--expected-python', $pythonVersion,
                     '--expected-executable', $activePython,
                     '--manifest', $manifestPath
-                ) -Stage 'repair-check' | Out-Null
+                ) -Stage 'repair-check' -EmitHeartbeat | Out-Null
                 Publish-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
                 Write-InstallerLog -Stage 'complete' -Message 'Existing environment is healthy; no rebuild required.'
+                Write-InstallProgress -Stage 'complete'
                 Write-InstallStatus -Value 'healthy' -Path $StatusPath
                 exit 0
             } catch {
@@ -100,11 +126,13 @@ try {
     [System.IO.Directory]::CreateDirectory($AppRoot) | Out-Null
     $basePython = $null
     $runtimeOwnership = 'reused'
+    Write-InstallProgress -Stage 'python-discovery'
     if ($installedManifest -and $installedManifest.runtime_ownership -eq 'private' -and $installedManifest.base_python) {
         if (Test-CompatiblePython -PythonPath ([string]$installedManifest.base_python) -ExpectedVersion $pythonVersion) {
             $basePython = [string]$installedManifest.base_python
             $runtimeOwnership = 'private'
         } else {
+            Write-InstallProgress -Stage 'python-install'
             $private = Install-PrivatePython -InstallerPath $pythonInstallerPath -AppRoot $AppRoot -ExpectedVersion $pythonVersion
             $basePython = [string]$private.PythonPath
             $privateRuntimeNew = [bool]$private.NewlyInstalled
@@ -115,6 +143,7 @@ try {
         $basePython = Find-CompatiblePython -ExpectedVersion $pythonVersion -ManagedRoot $AppRoot -ForceBundled:$ForceBundled
     }
     if (-not $basePython) {
+        Write-InstallProgress -Stage 'python-install'
         $private = Install-PrivatePython -InstallerPath $pythonInstallerPath -AppRoot $AppRoot -ExpectedVersion $pythonVersion
         $basePython = [string]$private.PythonPath
         $privateRuntimeNew = [bool]$private.NewlyInstalled
@@ -123,11 +152,14 @@ try {
 
     $transactionId = [Guid]::NewGuid().ToString('N')
     $stageRoot = Join-Path $AppRoot ('.staging\' + $transactionId)
+    $entrypointRequirementsPath = Join-Path $stageRoot 'entrypoint-requirements.txt'
     $stageVenv = Join-Path $stageRoot 'venv'
     [System.IO.Directory]::CreateDirectory($stageRoot) | Out-Null
-    Invoke-LoggedProcess -FilePath $basePython -Arguments @('-I', '-m', 'venv', $stageVenv) -Stage 'venv-create' | Out-Null
+    Write-InstallProgress -Stage 'venv-create'
+    Invoke-LoggedProcess -FilePath $basePython -Arguments @('-I', '-m', 'venv', $stageVenv) -Stage 'venv-create' -EmitHeartbeat | Out-Null
     $stagePython = Join-Path $stageVenv 'Scripts\python.exe'
     $wheelhouse = Join-Path $PayloadRoot 'wheelhouse'
+    Write-InstallProgress -Stage 'bootstrap-install'
     Invoke-LoggedProcess -FilePath $stagePython -Arguments @(
         '-I', '-m', 'pip', 'install',
         '--no-index',
@@ -136,7 +168,8 @@ try {
         '--no-deps',
         '--requirement', $bootstrapRequirementsPath,
         '--disable-pip-version-check'
-    ) -Stage 'bootstrap-install' | Out-Null
+    ) -Stage 'bootstrap-install' -EmitHeartbeat | Out-Null
+    Write-InstallProgress -Stage 'dependency-install'
     Invoke-LoggedProcess -FilePath $stagePython -Arguments @(
         '-I', '-m', 'pip', 'install',
         '--no-index',
@@ -145,9 +178,10 @@ try {
         '--no-deps',
         '--requirement', $RequirementsPath,
         '--disable-pip-version-check'
-    ) -Stage 'dependency-install' | Out-Null
+    ) -Stage 'dependency-install' -EmitHeartbeat | Out-Null
 
     $stageResult = Join-Path $stageRoot 'verification.json'
+    Write-InstallProgress -Stage 'verification'
     Invoke-LoggedProcess -FilePath $stagePython -Arguments @(
         $verifierPath,
         '--requirements', $RequirementsPath,
@@ -155,11 +189,12 @@ try {
         '--expected-python', $pythonVersion,
         '--expected-executable', $stagePython,
         '--output', $stageResult
-    ) -Stage 'verification' | Out-Null
+    ) -Stage 'verification' -EmitHeartbeat | Out-Null
     if ($TestFailAfterStagingVerification) {
         throw 'Test-only failure after successful staging verification.'
     }
 
+    Write-InstallProgress -Stage 'activation'
     if (Test-Path -LiteralPath $activeRoot) {
         $previousRoot = Join-Path $AppRoot ('.previous-' + $transactionId)
         Move-Item -LiteralPath $activeRoot -Destination $previousRoot
@@ -168,22 +203,29 @@ try {
     $activationAttempted = $true
     Update-VenvActivationPath -VenvRoot $activeRoot -OldRoot $stageVenv
 
-    # Python's distlib console launchers embed their interpreter path. Reinstall
-    # from the same verified offline locks after the same-volume rename, while
-    # the previous environment is still available and discovery is unpublished.
-    foreach ($lockPath in @($bootstrapRequirementsPath, $RequirementsPath)) {
-        Invoke-LoggedProcess -FilePath $activePython -Arguments @(
-            '-I', '-m', 'pip', 'install',
-            '--no-index',
-            '--find-links', $wheelhouse,
-            '--require-hashes',
-            '--no-deps',
-            '--force-reinstall',
-            '--requirement', $lockPath,
-            '--disable-pip-version-check'
-        ) -Stage 'post-promotion-relink' | Out-Null
-    }
+    # Distlib launchers embed their interpreter path. Reinstall only the locked
+    # distributions that own command entry points after the same-volume rename.
+    Write-InstallProgress -Stage 'entrypoint-relink'
+    Invoke-LoggedProcess -FilePath $activePython -Arguments @(
+        '-I',
+        $entrypointSelectorPath,
+        '--requirements', $RequirementsPath,
+        '--bootstrap-requirements', $bootstrapRequirementsPath,
+        '--output', $entrypointRequirementsPath
+    ) -Stage 'entrypoint-plan' | Out-Null
+    Invoke-LoggedProcess -FilePath $activePython -Arguments @(
+        '-I', '-m', 'pip', 'install',
+        '--no-index',
+        '--find-links', $wheelhouse,
+        '--require-hashes',
+        '--no-deps',
+        '--force-reinstall',
+        '--no-compile',
+        '--requirement', $entrypointRequirementsPath,
+        '--disable-pip-version-check'
+    ) -Stage 'entrypoint-relink' -EmitHeartbeat | Out-Null
 
+    Write-InstallProgress -Stage 'verification-final'
     $finalResult = Join-Path $stageRoot 'verification-final.json'
     Invoke-LoggedProcess -FilePath $activePython -Arguments @(
         $verifierPath,
@@ -192,7 +234,7 @@ try {
         '--expected-python', $pythonVersion,
         '--expected-executable', $activePython,
         '--output', $finalResult
-    ) -Stage 'verification-final' | Out-Null
+    ) -Stage 'verification-final' -EmitHeartbeat | Out-Null
     $verification = Get-Content -LiteralPath $finalResult -Raw -Encoding UTF8 | ConvertFrom-Json
 
     $installed = [ordered]@{
@@ -223,9 +265,10 @@ try {
     Publish-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -AppRoot $AppRoot -PythonExecutable $activePython -PythonVersion $pythonVersion -InstallerVersion $incomingVersion -ManifestPath $manifestPath
     $activationCommitted = $true
 
+    Write-InstallProgress -Stage 'cleanup'
     if ($previousRoot -and (Test-Path -LiteralPath $previousRoot)) {
         try {
-            Remove-OwnedDirectory -AppRoot $AppRoot -Path $previousRoot
+            Invoke-OwnedDirectoryCleanup -Path $previousRoot
         } catch {
             $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
             Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Previous environment cleanup deferred: {0}" -f $diagnostic)
@@ -234,7 +277,7 @@ try {
     }
     if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
         try {
-            Remove-OwnedDirectory -AppRoot $AppRoot -Path $stageRoot
+            Invoke-OwnedDirectoryCleanup -Path $stageRoot
         } catch {
             $diagnostic = Format-InstallerErrorRecord -ErrorRecord $_
             Write-InstallerLog -Stage 'cleanup' -Level 'WARN' -Message ("Staging cleanup deferred: {0}" -f $diagnostic)
@@ -246,6 +289,7 @@ try {
         $previousManifestPath = $null
     }
     Write-InstallerLog -Stage 'complete' -Message ("Installation completed: {0}" -f $activePython)
+    Write-InstallProgress -Stage 'complete'
     Write-InstallStatus -Value $operation -Path $StatusPath
     exit 0
 } catch {
@@ -255,16 +299,17 @@ try {
                 Format-InstallerErrorRecord -ErrorRecord $_
             )
         )
+        Write-InstallProgress -Stage 'complete'
         Write-InstallStatus -Value $operation -Path $StatusPath
         exit 0
     }
     Write-InstallerLog -Stage 'failure' -Level 'ERROR' -Message (
         Format-InstallerErrorRecord -ErrorRecord $_
     )
-    Write-InstallStatus -Value 'failed' -Path $StatusPath
+    Write-InstallProgress -Stage 'cleanup'
     try {
         if ($activationAttempted -and (Test-Path -LiteralPath (Join-Path $AppRoot 'venv'))) {
-            Remove-OwnedDirectory -AppRoot $AppRoot -Path (Join-Path $AppRoot 'venv')
+            Invoke-OwnedDirectoryCleanup -Path (Join-Path $AppRoot 'venv')
         }
         if ($previousRoot -and (Test-Path -LiteralPath $previousRoot)) {
             Move-Item -LiteralPath $previousRoot -Destination (Join-Path $AppRoot 'venv')
@@ -278,7 +323,7 @@ try {
             Restore-DiscoveryRegistration -RegistryPath ([string]$config.product.registry_path) -Snapshot $discoverySnapshot
         }
         if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
-            Remove-OwnedDirectory -AppRoot $AppRoot -Path $stageRoot
+            Invoke-OwnedDirectoryCleanup -Path $stageRoot
         }
         if ($privateRuntimeNew) {
             Uninstall-PrivatePython -AppRoot $AppRoot -InstallerFilename ([string]$config.target.python.filename)
@@ -288,5 +333,7 @@ try {
             Format-InstallerErrorRecord -ErrorRecord $_
         )
     }
+    Write-InstallProgress -Stage 'failed'
+    Write-InstallStatus -Value 'failed' -Path $StatusPath
     exit 20
 }

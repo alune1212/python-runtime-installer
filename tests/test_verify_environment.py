@@ -45,6 +45,7 @@ def test_run_verification_success_is_deterministic(
     )
     monkeypatch.setattr(verifier, "verify_packages", lambda path: {"pandas": "1.0"})
     monkeypatch.setattr(verifier, "verify_bootstrap", lambda path: {"pip": "1.0"})
+    monkeypatch.setattr(verifier, "verify_entrypoint_launchers", lambda: calls.append("launchers"))
     monkeypatch.setattr(verifier, "verify_immutable_distribution_set", lambda *args: None)
 
     def smoke() -> None:
@@ -61,7 +62,7 @@ def test_run_verification_success_is_deterministic(
     assert result["status"] == "passed"
     assert result["packages"] == {"pandas": "1.0"}
     assert result["bootstrap_tooling"] == {"pip": "1.0"}
-    assert calls == ["runtime", "smoke"]
+    assert calls == ["runtime", "launchers", "smoke"]
 
 
 @pytest.mark.parametrize("failure", ["version drift", "missing import", "pip conflict"])
@@ -121,3 +122,86 @@ def test_immutable_distribution_set_rejects_custom_packages(
     )
     with pytest.raises(verifier.VerificationError, match="custom-package"):
         verifier.verify_immutable_distribution_set({"pandas": "1.0"}, {"pip": "1.0"})
+
+
+def test_entrypoint_launcher_must_target_current_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    executable = scripts / "python.exe"
+    executable.write_bytes(b"python")
+    launcher = scripts / "example.exe"
+    monkeypatch.setattr(verifier.sys, "executable", str(executable))
+    monkeypatch.setattr(verifier, "_entrypoint_launchers", lambda: [("example", executable)])
+
+    launcher.write_bytes(b'MZ...#!"' + verifier.os.fsencode(executable) + b'"\nPK')
+    verifier.verify_entrypoint_launchers()
+
+    launcher.write_bytes(b"MZ...#!" + verifier.os.fsencode(executable) + b"\nPK")
+    verifier.verify_entrypoint_launchers()
+
+    launcher.write_bytes(b'MZ...#!"C:\\staging\\python.exe"\nPK')
+    with pytest.raises(verifier.VerificationError, match="wrong interpreter"):
+        verifier.verify_entrypoint_launchers()
+
+
+def test_entrypoint_launchers_include_pip_variants_and_gui_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class EntryPoint:
+        def __init__(self, name: str, group: str) -> None:
+            self.name = name
+            self.group = group
+
+    class Distribution:
+        def __init__(self, name: str, entry_points: list[EntryPoint]) -> None:
+            self.metadata = {"Name": name}
+            self.entry_points = entry_points
+
+    executable = tmp_path / "Scripts" / "python.exe"
+    monkeypatch.setattr(verifier.sys, "executable", str(executable))
+    monkeypatch.setattr(
+        verifier.importlib.metadata,
+        "distributions",
+        lambda: [
+            Distribution("pip", [EntryPoint("pip", "console_scripts")]),
+            Distribution("gui-tool", [EntryPoint("gui-tool", "gui_scripts")]),
+        ],
+    )
+
+    launchers = dict(verifier._entrypoint_launchers())
+    assert launchers["pip"] == executable
+    assert launchers[f"pip{verifier.sys.version_info.major}"] == executable
+    assert launchers[f"pip{verifier.sys.version_info.major}.{verifier.sys.version_info.minor}"] == (
+        executable
+    )
+    assert launchers["gui-tool"] == executable.with_name("pythonw.exe")
+
+
+def test_entrypoint_launcher_rejects_unsafe_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EntryPoint:
+        name = "..\\unsafe"
+        group = "console_scripts"
+
+    class Distribution:
+        def __init__(self) -> None:
+            self.metadata = {"Name": "unsafe-tool"}
+            self.entry_points = [EntryPoint()]
+
+    monkeypatch.setattr(verifier.importlib.metadata, "distributions", lambda: [Distribution()])
+    with pytest.raises(verifier.VerificationError, match="Unsafe"):
+        verifier._entrypoint_launchers()
+
+
+def test_entrypoint_launcher_must_exist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    executable = tmp_path / "Scripts" / "python.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"python")
+    monkeypatch.setattr(verifier.sys, "executable", str(executable))
+    monkeypatch.setattr(verifier, "_entrypoint_launchers", lambda: [("missing", executable)])
+
+    with pytest.raises(verifier.VerificationError, match="missing"):
+        verifier.verify_entrypoint_launchers()

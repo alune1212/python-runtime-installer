@@ -116,6 +116,7 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'config') -Destination $payloa
 [System.IO.Directory]::CreateDirectory((Join-Path $payloadRoot 'scripts\build')) | Out-Null
 [System.IO.Directory]::CreateDirectory((Join-Path $payloadRoot 'scripts\windows')) | Out-Null
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts\__init__.py') -Destination (Join-Path $payloadRoot 'scripts')
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts\select_entrypoint_requirements.py') -Destination (Join-Path $payloadRoot 'scripts')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts\verify_environment.py') -Destination (Join-Path $payloadRoot 'scripts')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts\build\__init__.py') -Destination (Join-Path $payloadRoot 'scripts\build')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts\build\requirements_lock.py') -Destination (Join-Path $payloadRoot 'scripts\build')

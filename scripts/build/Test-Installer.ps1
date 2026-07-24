@@ -65,9 +65,12 @@ $isGitHubHostedRunner = (
     [StringComparer]::OrdinalIgnoreCase.Equals([string]$env:RUNNER_ENVIRONMENT, 'github-hosted')
 )
 $allowWindowsServerForE2E = $isWindowsServer -and $isGitHubHostedRunner
+$script:e2eMayOwnInstallation = $false
 $evidence = [ordered]@{
     schema_version = 1
     collected_at = [DateTime]::UtcNow.ToString('o')
+    status = 'running'
+    current_phase = $null
     host = [ordered]@{
         windows_version = [Environment]::OSVersion.VersionString
         architecture = $nativeArchitecture
@@ -87,12 +90,120 @@ $evidence = [ordered]@{
     commands = [ordered]@{}
     exit_codes = [ordered]@{}
     log_paths = [ordered]@{}
+    durations_seconds = [ordered]@{}
+    terminations = [ordered]@{}
+    diagnostics = [ordered]@{}
 }
 
 function Test-E2ECondition([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
         throw $Message
     }
+}
+
+function Write-E2EEvidence([string]$Path) {
+    $targetPath = [IO.Path]::GetFullPath($Path)
+    $evidenceDirectory = [IO.Path]::GetDirectoryName($targetPath)
+    [System.IO.Directory]::CreateDirectory($evidenceDirectory) | Out-Null
+    $temporaryPath = Join-Path $evidenceDirectory (
+        ".{0}.{1}.tmp" -f [IO.Path]::GetFileName($targetPath), [Guid]::NewGuid().ToString('N')
+    )
+    $backupPath = Join-Path $evidenceDirectory (
+        ".{0}.{1}.bak" -f [IO.Path]::GetFileName($targetPath), [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporaryPath,
+            ($script:evidence | ConvertTo-Json -Depth 10),
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        if ([System.IO.File]::Exists($targetPath)) {
+            [System.IO.File]::Replace($temporaryPath, $targetPath, $backupPath)
+            [System.IO.File]::Delete($backupPath)
+        } else {
+            [System.IO.File]::Move($temporaryPath, $targetPath)
+        }
+    } finally {
+        if ([System.IO.File]::Exists($temporaryPath)) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            [System.IO.File]::Delete($backupPath)
+        }
+    }
+}
+
+function Get-E2EProcessTree([int]$RootProcessId) {
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $processIds = New-Object 'System.Collections.Generic.HashSet[int]'
+    [void]$processIds.Add($RootProcessId)
+    do {
+        $added = $false
+        foreach ($candidate in $allProcesses) {
+            if (
+                $processIds.Contains([int]$candidate.ParentProcessId) -and
+                -not $processIds.Contains([int]$candidate.ProcessId)
+            ) {
+                [void]$processIds.Add([int]$candidate.ProcessId)
+                $added = $true
+            }
+        }
+    } while ($added)
+    return @($processIds | Sort-Object)
+}
+
+function Stop-E2EProcessTree(
+    [System.Diagnostics.Process]$Process,
+    [string]$Phase
+) {
+    $processIds = @(Get-E2EProcessTree -RootProcessId $Process.Id)
+    $result = [ordered]@{
+        phase = $Phase
+        root_process_id = $Process.Id
+        process_ids = $processIds
+        taskkill_exit_code = $null
+        taskkill_timed_out = $false
+        remaining_process_ids = @()
+        terminated = $false
+    }
+    $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    try {
+        $terminator = Start-Process -FilePath $taskkillPath -ArgumentList @(
+            '/PID',
+            [string]$Process.Id,
+            '/T',
+            '/F'
+        ) -WindowStyle Hidden -PassThru
+        if ($terminator.WaitForExit(15000)) {
+            $result.taskkill_exit_code = $terminator.ExitCode
+        } else {
+            $result.taskkill_timed_out = $true
+            $terminator.Kill()
+            [void]$terminator.WaitForExit(5000)
+        }
+    } catch {
+        $result['taskkill_error'] = $_.Exception.Message
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $remaining = @($processIds | Where-Object {
+                Get-Process -Id $_ -ErrorAction SilentlyContinue
+            })
+        if ($remaining.Count -eq 0) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    foreach ($remainingProcessId in $remaining) {
+        Stop-Process -Id $remainingProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $result.remaining_process_ids = @($processIds | Where-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue
+        })
+    $result.terminated = $result.remaining_process_ids.Count -eq 0
+    return [pscustomobject]$result
 }
 
 function Get-ReusablePythonSnapshot(
@@ -271,19 +382,167 @@ function Invoke-Setup(
 ) {
     $logsBefore = @(Get-InstallerLogSnapshot | Select-Object -ExpandProperty FullName)
     $script:evidence.commands[$Phase] = "$([System.IO.Path]::GetFileName($Path)) $($Arguments -join ' ')"
-    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
-    $script:evidence.exit_codes[$Phase] = $process.ExitCode
-
-    if ($AllowedExitCodes -notcontains $process.ExitCode) {
-        $setupLogTail = Get-SanitizedSetupLogTail
-        throw "Installer phase $Phase exited with $($process.ExitCode). Inno Setup log tail:`n$setupLogTail"
+    $script:evidence.current_phase = $Phase
+    Write-E2EEvidence -Path $EvidencePath
+    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $nextProgressSeconds = 30
+    while (-not $process.WaitForExit(1000)) {
+        if ($stopwatch.Elapsed.TotalSeconds -ge $nextProgressSeconds) {
+            $sample = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+            $responding = if ($sample) { [string]$sample.Responding } else { 'exited' }
+            $progressMessage = "E2E_PROGRESS phase={0} elapsed={1}s responding={2}" -f @(
+                $Phase
+                [int]$stopwatch.Elapsed.TotalSeconds
+                $responding
+            )
+            [Console]::Out.WriteLine($progressMessage)
+            $nextProgressSeconds += 30
+        }
+        if ($stopwatch.Elapsed.TotalMinutes -ge 12) {
+            $stopwatch.Stop()
+            $termination = Stop-E2EProcessTree -Process $process -Phase $Phase
+            $script:evidence.durations_seconds[$Phase] = [Math]::Round(
+                $stopwatch.Elapsed.TotalSeconds,
+                2
+            )
+            $script:evidence.terminations[$Phase] = $termination
+            Write-E2EEvidence -Path $EvidencePath
+            throw "Installer phase $Phase exceeded the 12-minute test limit; process-tree termination success=$($termination.terminated)."
+        }
     }
+    $process.WaitForExit()
+    $stopwatch.Stop()
+    $script:evidence.durations_seconds[$Phase] = [Math]::Round(
+        $stopwatch.Elapsed.TotalSeconds,
+        2
+    )
+    $script:evidence.exit_codes[$Phase] = $process.ExitCode
+    $completionMessage = "E2E_PHASE_COMPLETE phase={0} elapsed={1}s exit_code={2}" -f @(
+        $Phase
+        $script:evidence.durations_seconds[$Phase]
+        $process.ExitCode
+    )
+    [Console]::Out.WriteLine($completionMessage)
+    $logDiscoveryError = $null
     try {
         $script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath -BeforePaths $logsBefore -Pattern 'installer-install-*.log' -Phase $Phase
     } catch {
-        $setupLogTail = Get-SanitizedSetupLogTail
-        throw "$($_.Exception.Message)`nInno Setup log tail:`n$setupLogTail"
+        $logDiscoveryError = $_.Exception.Message
+        $script:evidence.diagnostics["${Phase}_log_discovery"] = $logDiscoveryError
     }
+    Write-E2EEvidence -Path $EvidencePath
+    if ($AllowedExitCodes -notcontains $process.ExitCode) {
+        $setupLogTail = Get-SanitizedSetupLogTail
+        throw "Installer phase $Phase exited with $($process.ExitCode). Log discovery: $logDiscoveryError`nInno Setup log tail:`n$setupLogTail"
+    }
+    if ($logDiscoveryError) {
+        $setupLogTail = Get-SanitizedSetupLogTail
+        throw "$logDiscoveryError`nInno Setup log tail:`n$setupLogTail"
+    }
+    $script:evidence.current_phase = $null
+    Write-E2EEvidence -Path $EvidencePath
+    return $process.ExitCode
+}
+
+function Invoke-MonitoredUninstall(
+    [string]$Path,
+    [string]$Phase,
+    [int]$TimeoutSeconds = 180,
+    [switch]$AllowMissingLog
+) {
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    $logsBefore = @(Get-InstallerLogSnapshot | Select-Object -ExpandProperty FullName)
+    $script:evidence.commands[$Phase] = "$([System.IO.Path]::GetFileName($Path)) $($arguments -join ' ')"
+    $script:evidence.current_phase = $Phase
+    Write-E2EEvidence -Path $EvidencePath
+    $process = Start-Process -FilePath $Path -ArgumentList $arguments -PassThru
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $nextProgressSeconds = 30
+    while (-not $process.WaitForExit(1000)) {
+        if ($stopwatch.Elapsed.TotalSeconds -ge $nextProgressSeconds) {
+            $sample = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+            $responding = if ($sample) { [string]$sample.Responding } else { 'exited' }
+            $progressMessage = "E2E_PROGRESS phase={0} elapsed={1}s responding={2}" -f @(
+                $Phase
+                [int]$stopwatch.Elapsed.TotalSeconds
+                $responding
+            )
+            [Console]::Out.WriteLine($progressMessage)
+            $nextProgressSeconds += 30
+        }
+        if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            $stopwatch.Stop()
+            $termination = Stop-E2EProcessTree -Process $process -Phase $Phase
+            $script:evidence.durations_seconds[$Phase] = [Math]::Round(
+                $stopwatch.Elapsed.TotalSeconds,
+                2
+            )
+            $script:evidence.terminations[$Phase] = $termination
+            Write-E2EEvidence -Path $EvidencePath
+            throw "Uninstaller phase $Phase exceeded the $TimeoutSeconds-second test limit; process-tree termination success=$($termination.terminated)."
+        }
+    }
+    $process.WaitForExit()
+    $postExitCleanupTimedOut = $false
+    if ($process.ExitCode -eq 0) {
+        $postExitCleanupDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (
+            (Test-Path -LiteralPath $appRoot) -and
+            [DateTime]::UtcNow -lt $postExitCleanupDeadline
+        ) {
+            if ($stopwatch.Elapsed.TotalSeconds -ge $nextProgressSeconds) {
+                $progressMessage = "E2E_PROGRESS phase={0} elapsed={1}s responding=post-exit-cleanup" -f @(
+                    $Phase
+                    [int]$stopwatch.Elapsed.TotalSeconds
+                )
+                [Console]::Out.WriteLine($progressMessage)
+                $nextProgressSeconds += 30
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        $postExitCleanupTimedOut = Test-Path -LiteralPath $appRoot
+        if ($postExitCleanupTimedOut) {
+            $script:evidence.diagnostics["${Phase}_post_exit_cleanup"] = (
+                "Application root still exists 30 seconds after the uninstaller process exited: {0}" -f
+                $appRoot
+            )
+        }
+    }
+    $stopwatch.Stop()
+    $script:evidence.durations_seconds[$Phase] = [Math]::Round(
+        $stopwatch.Elapsed.TotalSeconds,
+        2
+    )
+    $script:evidence.exit_codes[$Phase] = $process.ExitCode
+    $completionMessage = "E2E_PHASE_COMPLETE phase={0} elapsed={1}s exit_code={2}" -f @(
+        $Phase
+        $script:evidence.durations_seconds[$Phase]
+        $process.ExitCode
+    )
+    [Console]::Out.WriteLine($completionMessage)
+    $logDiscoveryError = $null
+    try {
+        $script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath `
+            -BeforePaths $logsBefore `
+            -Pattern 'installer-uninstall-*.log' `
+            -Phase $Phase
+    } catch {
+        $logDiscoveryError = $_.Exception.Message
+        $script:evidence.diagnostics["${Phase}_log_discovery"] = $logDiscoveryError
+    }
+    Write-E2EEvidence -Path $EvidencePath
+    if ($process.ExitCode -ne 0) {
+        throw "Uninstaller phase $Phase exited with $($process.ExitCode). Log discovery: $logDiscoveryError"
+    }
+    if ($postExitCleanupTimedOut) {
+        throw $script:evidence.diagnostics["${Phase}_post_exit_cleanup"]
+    }
+    if ($logDiscoveryError -and -not $AllowMissingLog) {
+        throw $logDiscoveryError
+    }
+    $script:evidence.current_phase = $null
+    Write-E2EEvidence -Path $EvidencePath
     return $process.ExitCode
 }
 
@@ -304,6 +563,74 @@ function Invoke-ManagedVerification([string]$Path, [string]$ResultPath, [string]
     return Get-Content -LiteralPath $ResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Invoke-E2EFailureCleanup {
+    $externalHashBefore = if (Test-Path -LiteralPath $ReusablePythonPath -PathType Leaf) {
+        (Get-FileHash -LiteralPath $ReusablePythonPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else {
+        $null
+    }
+    $logsBefore = @(Get-InstallerLogSnapshot).Count
+    $result = [ordered]@{
+        attempted = $false
+        reason = ''
+        exit_code = $null
+        app_root_removed = -not (Test-Path -LiteralPath $appRoot)
+        registry_removed = -not (Test-Path -LiteralPath $registryPath)
+        start_menu_removed = -not (Test-Path -LiteralPath $startMenu)
+        logs_before = $logsBefore
+        logs_after = $logsBefore
+        external_python_sha256_before = $externalHashBefore
+        external_python_sha256_after = $externalHashBefore
+        external_python_preserved = $true
+    }
+    if (-not $script:e2eMayOwnInstallation) {
+        $result.reason = 'The E2E run did not begin an installer mutation.'
+        return [pscustomobject]$result
+    }
+
+    $recoveryUninstaller = Join-Path $appRoot 'unins000.exe'
+    if (-not (Test-Path -LiteralPath $recoveryUninstaller -PathType Leaf)) {
+        $result.reason = 'The product uninstaller is unavailable; no fallback deletion was attempted.'
+        return [pscustomobject]$result
+    }
+
+    $result.attempted = $true
+    try {
+        $result.exit_code = Invoke-MonitoredUninstall `
+            -Path $recoveryUninstaller `
+            -Phase 'failure_cleanup' `
+            -AllowMissingLog
+        $result.reason = 'The product uninstaller completed.'
+    } catch {
+        $result.reason = "The product uninstaller failed: $($_.Exception.Message)"
+    }
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (
+        (Test-Path -LiteralPath $appRoot) -and
+        [DateTime]::UtcNow -lt $cleanupDeadline
+    ) {
+        Start-Sleep -Milliseconds 250
+    }
+    $result.app_root_removed = -not (Test-Path -LiteralPath $appRoot)
+    $result.registry_removed = -not (Test-Path -LiteralPath $registryPath)
+    $result.start_menu_removed = -not (Test-Path -LiteralPath $startMenu)
+    $result.logs_after = @(Get-InstallerLogSnapshot).Count
+    if (Test-Path -LiteralPath $ReusablePythonPath -PathType Leaf) {
+        $result.external_python_sha256_after = (
+            Get-FileHash -LiteralPath $ReusablePythonPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } else {
+        $result.external_python_sha256_after = $null
+    }
+    $result.external_python_preserved = (
+        $externalHashBefore -and
+        $externalHashBefore -eq $result.external_python_sha256_after
+    )
+    return [pscustomobject]$result
+}
+
+try {
+Write-E2EEvidence -Path $EvidencePath
 Test-E2ECondition (-not (Test-Path -LiteralPath $appRoot)) "E2E test requires a clean application path: $appRoot"
 Test-E2ECondition (-not (Test-Path -LiteralPath $registryPath)) "E2E test requires clean discovery metadata: $registryPath"
 if ($InstallerPath.EndsWith('-unsigned.exe', [StringComparison]::OrdinalIgnoreCase)) {
@@ -333,10 +660,11 @@ $evidence['reusable_python_baseline'] = [ordered]@{
     captured_before_install = $true
 }
 
-$setupArguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ("/LOG={0}" -f $setupLog))
+$setupArguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f $setupLog))
 if ($allowWindowsServerForE2E) {
     $setupArguments += '/E2EALLOWWINDOWSSERVER'
 }
+$script:e2eMayOwnInstallation = $true
 Invoke-Setup -Path $InstallerPath -Phase 'forced_private_install' -Arguments ($setupArguments + '/FORCEBUNDLED') | Out-Null
 
 Test-E2ECondition (Test-Path -LiteralPath $pythonPath -PathType Leaf) "Managed Python missing: $pythonPath"
@@ -370,6 +698,7 @@ $requiredChecks = @(
     'runtime',
     'locked-package-versions',
     'immutable-distribution-set',
+    'entrypoint-launchers',
     'imports',
     'pip-check',
     'scientific-and-files',
@@ -439,9 +768,41 @@ $launcherProbeLines = @(
 )
 [System.IO.File]::WriteAllText($launcherProbePath, ($launcherProbeLines -join [Environment]::NewLine), [Text.Encoding]::ASCII)
 try {
-    $launcherProbe = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', ('"{0}"' -f $launcherProbePath)) -WindowStyle Hidden -Wait -PassThru
+    $launcherProbeArguments = '/d /s /c ""{0}""' -f $launcherProbePath
+    $evidence.current_phase = 'start_menu_activation_probe'
+    Write-E2EEvidence -Path $EvidencePath
+    $launcherProbe = Start-Process `
+        -FilePath $env:ComSpec `
+        -ArgumentList $launcherProbeArguments `
+        -WindowStyle Hidden `
+        -PassThru
+    $launcherProbeStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $launcherProbe.WaitForExit(1000)) {
+        if ($launcherProbeStopwatch.Elapsed.TotalSeconds -ge 30) {
+            $launcherProbeStopwatch.Stop()
+            $termination = Stop-E2EProcessTree `
+                -Process $launcherProbe `
+                -Phase 'start_menu_activation_probe'
+            $evidence.durations_seconds['start_menu_activation_probe'] = [Math]::Round(
+                $launcherProbeStopwatch.Elapsed.TotalSeconds,
+                2
+            )
+            $evidence.terminations['start_menu_activation_probe'] = $termination
+            Write-E2EEvidence -Path $EvidencePath
+            throw "Start menu activation probe exceeded 30 seconds; process-tree termination success=$($termination.terminated)."
+        }
+    }
+    $launcherProbe.WaitForExit()
+    $launcherProbeStopwatch.Stop()
+    $evidence.durations_seconds['start_menu_activation_probe'] = [Math]::Round(
+        $launcherProbeStopwatch.Elapsed.TotalSeconds,
+        2
+    )
     $evidence.exit_codes['start_menu_activation_probe'] = $launcherProbe.ExitCode
+    Write-E2EEvidence -Path $EvidencePath
     Test-E2ECondition ($launcherProbe.ExitCode -eq 0) 'Start menu activation probe failed.'
+    $evidence.current_phase = $null
+    Write-E2EEvidence -Path $EvidencePath
 } finally {
     [System.IO.File]::Delete($launcherProbePath)
 }
@@ -549,16 +910,13 @@ $evidence['failed_staging'] = [ordered]@{
 
 $logsBeforePrivateUninstall = @(Get-InstallerLogSnapshot)
 Test-E2ECondition ($logsBeforePrivateUninstall.Count -gt 0) 'No installer logs exist before uninstall.'
-$privateLogPathsBefore = @($logsBeforePrivateUninstall | Select-Object -ExpandProperty FullName)
 $privateLogsGuaranteedRetained = @($logsBeforePrivateUninstall | Select-Object -First 19 -ExpandProperty FullName)
 $uninstaller = Join-Path $appRoot 'unins000.exe'
 Test-E2ECondition (Test-Path -LiteralPath $uninstaller -PathType Leaf) 'Uninstaller is missing.'
-$evidence.commands['private_uninstall'] = "$([System.IO.Path]::GetFileName($uninstaller)) /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
-$privateUninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
-$evidence.exit_codes['private_uninstall'] = $privateUninstall.ExitCode
-$privateUninstallLog = Get-NewInstallerLogPath -BeforePaths $privateLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'private_uninstall'
+$privateUninstallExitCode = Invoke-MonitoredUninstall -Path $uninstaller -Phase 'private_uninstall'
+$privateUninstallLog = [string]$evidence.log_paths['private_uninstall']
 $evidence.log_paths['private_uninstall'] = $privateUninstallLog
-Test-E2ECondition ($privateUninstall.ExitCode -eq 0) 'Private-runtime uninstall failed.'
+Test-E2ECondition ($privateUninstallExitCode -eq 0) 'Private-runtime uninstall failed.'
 $reusablePythonAfterPrivateUninstall = Test-ReusablePythonUnchanged `
     -Path $ReusablePythonPath `
     -Baseline $reusablePythonBaseline `
@@ -618,13 +976,10 @@ try {
         [System.IO.File]::Delete($reuseResultPath)
     }
     $logsBeforeReuseUninstall = @(Get-InstallerLogSnapshot)
-    $reuseLogPathsBefore = @($logsBeforeReuseUninstall | Select-Object -ExpandProperty FullName)
     $reuseLogsGuaranteedRetained = @($logsBeforeReuseUninstall | Select-Object -First 19 -ExpandProperty FullName)
     $reuseUninstaller = Join-Path $appRoot 'unins000.exe'
-    $evidence.commands['reuse_uninstall'] = "$([System.IO.Path]::GetFileName($reuseUninstaller)) /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
-    $reuseUninstall = Start-Process -FilePath $reuseUninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
-    $evidence.exit_codes['reuse_uninstall'] = $reuseUninstall.ExitCode
-    Test-E2ECondition ($reuseUninstall.ExitCode -eq 0) 'Reused-runtime uninstall failed.'
+    $reuseUninstallExitCode = Invoke-MonitoredUninstall -Path $reuseUninstaller -Phase 'reuse_uninstall'
+    Test-E2ECondition ($reuseUninstallExitCode -eq 0) 'Reused-runtime uninstall failed.'
     $reusablePythonAfterReuseUninstall = Test-ReusablePythonUnchanged `
         -Path $ReusablePythonPath `
         -Baseline $reusablePythonBaseline `
@@ -632,7 +987,7 @@ try {
         -InstallerOwnedRoot $appRoot `
         -Phase 'reuse_uninstall'
     Test-E2ECondition (Test-Path -LiteralPath $ReusablePythonPath -PathType Leaf) 'Reused CPython was removed by uninstall.'
-    $reuseUninstallLog = Get-NewInstallerLogPath -BeforePaths $reuseLogPathsBefore -Pattern 'installer-uninstall-*.log' -Phase 'reuse_uninstall'
+    $reuseUninstallLog = [string]$evidence.log_paths['reuse_uninstall']
     $evidence.log_paths['reuse_uninstall'] = $reuseUninstallLog
     Test-E2ECondition (-not (Test-Path -LiteralPath (Join-Path $appRoot 'venv'))) 'Managed environment survived reused-runtime uninstall.'
     Test-E2ECondition (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) 'Installed manifest survived reused-runtime uninstall.'
@@ -727,9 +1082,44 @@ $evidence['logs'] = [ordered]@{
     sensitive_value_scan = 'passed'
     verification_before_completion = $verificationBeforeCompletion
 }
+$evidence.status = 'passed'
+$evidence.current_phase = $null
 $evidence['completed_at'] = [DateTime]::UtcNow.ToString('o')
-$evidenceDirectory = Split-Path -Parent $EvidencePath
-[System.IO.Directory]::CreateDirectory($evidenceDirectory) | Out-Null
-[System.IO.File]::WriteAllText($EvidencePath, ($evidence | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
-[Environment]::SetEnvironmentVariable('PYTHON_RUNTIME_INSTALLER_E2E_SECRET', $null, 'Process')
+Write-E2EEvidence -Path $EvidencePath
 Write-Output "End-to-end installer test passed. Evidence: $EvidencePath"
+} catch {
+    $failureRecord = $_
+    $failedPhase = if ($evidence.current_phase) {
+        [string]$evidence.current_phase
+    } else {
+        'preflight-or-assertion'
+    }
+    $failureMessage = [string]$failureRecord.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($secretSentinel)) {
+        $failureMessage = $failureMessage.Replace($secretSentinel, '<redacted>')
+    }
+    $evidence.status = 'failed'
+    $evidence['failure'] = [ordered]@{
+        phase = $failedPhase
+        exception_type = $failureRecord.Exception.GetType().FullName
+        message = $failureMessage
+    }
+    $evidence['completed_at'] = [DateTime]::UtcNow.ToString('o')
+    try {
+        Write-E2EEvidence -Path $EvidencePath
+    } catch {
+        [Console]::Error.WriteLine("Could not persist initial failure evidence: {0}" -f $_.Exception.Message)
+    }
+
+    $evidence['failure_cleanup'] = Invoke-E2EFailureCleanup
+    $evidence.current_phase = $null
+    $evidence['completed_at'] = [DateTime]::UtcNow.ToString('o')
+    try {
+        Write-E2EEvidence -Path $EvidencePath
+    } catch {
+        [Console]::Error.WriteLine("Could not persist final failure evidence: {0}" -f $_.Exception.Message)
+    }
+    throw $failureRecord
+} finally {
+    [Environment]::SetEnvironmentVariable('PYTHON_RUNTIME_INSTALLER_E2E_SECRET', $null, 'Process')
+}

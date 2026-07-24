@@ -139,6 +139,49 @@ def verify_immutable_distribution_set(
         )
 
 
+def _entrypoint_launchers() -> list[tuple[str, Path]]:
+    console_target = Path(sys.executable)
+    gui_target = console_target.with_name("pythonw.exe")
+    launchers: dict[str, Path] = {}
+    for distribution in importlib.metadata.distributions():
+        distribution_name = distribution.metadata.get("Name", "")
+        canonical_distribution = re.sub(r"[-_.]+", "-", distribution_name).lower()
+        for entry_point in distribution.entry_points:
+            if entry_point.group not in {"console_scripts", "gui_scripts"}:
+                continue
+            name = entry_point.name
+            if not name or Path(name).name != name:
+                raise VerificationError(f"Unsafe command entry-point name: {name!r}")
+            target = console_target if entry_point.group == "console_scripts" else gui_target
+            existing_target = launchers.get(name)
+            if existing_target is not None and existing_target != target:
+                raise VerificationError(f"Ambiguous command entry-point launcher: {name}")
+            launchers[name] = target
+            if canonical_distribution == "pip" and name == "pip":
+                launchers[f"pip{sys.version_info.major}"] = console_target
+                launchers[f"pip{sys.version_info.major}.{sys.version_info.minor}"] = console_target
+    if not launchers:
+        raise VerificationError("No command entry-point launchers were found")
+    return sorted(launchers.items())
+
+
+def verify_entrypoint_launchers() -> None:
+    scripts_directory = Path(sys.executable).parent
+    for name, target in _entrypoint_launchers():
+        target_bytes = os.fsencode(target)
+        shebangs = {
+            b"#!" + target_bytes + b"\n",
+            b'#!"' + target_bytes + b'"\n',
+        }
+        launcher = scripts_directory / f"{name}.exe"
+        try:
+            content = launcher.read_bytes()
+        except OSError as exc:
+            raise VerificationError(f"Command launcher is missing: {launcher}") from exc
+        if not any(shebang in content for shebang in shebangs):
+            raise VerificationError(f"Command launcher targets the wrong interpreter: {launcher}")
+
+
 def smoke_scientific_and_files() -> None:
     import matplotlib
 
@@ -261,6 +304,7 @@ def run_verification(
     packages = verify_packages(requirements)
     bootstrap_tooling = verify_bootstrap(bootstrap_requirements)
     verify_immutable_distribution_set(packages, bootstrap_tooling)
+    verify_entrypoint_launchers()
     for smoke_test in smoke_tests:
         smoke_test()
     if manifest:
@@ -278,6 +322,7 @@ def run_verification(
             "runtime",
             "locked-package-versions",
             "immutable-distribution-set",
+            "entrypoint-launchers",
             "imports",
             "pip-check",
             "scientific-and-files",

@@ -19,6 +19,9 @@ def test_target_install_is_offline_hash_checked_and_transactional() -> None:
         "--no-deps",
         "'.staging\\'",
         "'.previous-'",
+        "select_entrypoint_requirements.py",
+        "entrypoint-requirements.txt",
+        "--no-compile",
         "Move-Item -LiteralPath $stageVenv -Destination $activeRoot",
         "Publish-DiscoveryRegistration",
         "Downgrade blocked",
@@ -26,6 +29,8 @@ def test_target_install_is_offline_hash_checked_and_transactional() -> None:
         assert required in script
     assert "Invoke-WebRequest" not in script
     assert "http://" not in script and "https://" not in script
+
+    assert "foreach ($lockPath" not in script
 
 
 def test_private_runtime_never_changes_path_or_machine_scope() -> None:
@@ -79,6 +84,12 @@ def test_failed_clean_install_removes_only_new_shell_state_and_expands_log_path(
         "procedure ReportManagedRuntimeFailure(ErrorMessage: String; ExitCode: Integer);",
         "SuppressibleMsgBox(ErrorMessage, mbCriticalError, MB_OK, IDOK);",
         "WizardForm.FinishedHeadingLabel.Caption := CustomMessage('InstallFailedHeading');",
+        "ExecAndLogOutput(",
+        "@HandleManagedRuntimeOutput",
+        "PYRUNTIME_PROGRESS|",
+        "PYRUNTIME_HEARTBEAT|",
+        "ProgressElapsed",
+        "WizardForm.ProgressGauge.Position",
         "FmtMessage(",
         "ExistingManagedManifest := FileExists(ExpandConstant('{app}\\manifest.json'));",
         "ManagedInstallStarted := True;",
@@ -95,8 +106,19 @@ def test_failed_clean_install_removes_only_new_shell_state_and_expands_log_path(
         assert required in project
     assert "%%LOCALAPPDATA%%" not in project
     assert "[Run]" in project
-    assert 'Parameters: "{code:GetManagedRuntimeParameters}"' in project
-    assert "BeforeInstall: BeginManagedRuntimeInstall" in project
+    runtime = read("scripts/windows/RuntimeInstaller.psm1")
+    assert "$process.WaitForExit(250)" in runtime
+    assert "[switch]$EmitHeartbeat" in runtime
+    assert "HeartbeatIntervalSeconds = 5" in runtime
+    assert "OutputDrainTimeoutSeconds = 15" in runtime
+    assert "$stdoutTask.IsCompleted" in runtime
+    assert "$stderrTask.IsCompleted" in runtime
+    assert "ENSUREPIP_OPTIONS" in runtime
+    assert "StartsWith('PIP_'" in runtime
+    assert "Invoke-OwnedDirectoryCleanup" in read("scripts/windows/Install-Runtime.ps1")
+    assert "ProgressCleanup" in project
+    assert "GetManagedRuntimeParameters('')" in project
+    assert "BeforeInstall: RunManagedRuntimeInstall" in project
     assert "AfterInstall: CompleteManagedRuntimeInstall" in project
     assert "procedure CurStepChanged" not in project
     assert "if not Exec(" not in project
@@ -152,6 +174,7 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "installer-e2e-evidence.json",
         "Test-PathsUnchanged",
         "verification_checks",
+        "entrypoint-launchers",
         "private_python_removed",
         "manifest_removed",
         "application_root_removed",
@@ -167,6 +190,22 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         "registry_restored",
         "Get-NewInstallerLogPath",
         "log_paths",
+        "durations_seconds",
+        "E2E_PROGRESS phase=",
+        "exceeded the 12-minute test limit",
+        "Invoke-MonitoredUninstall",
+        "exceeded the $TimeoutSeconds-second test limit",
+        "Stop-E2EProcessTree",
+        "taskkill.exe",
+        "Write-E2EEvidence",
+        "[System.IO.File]::Replace",
+        "Invoke-E2EFailureCleanup",
+        "status = 'failed'",
+        "process-tree termination success=",
+        '/d /s /c ""{0}""',
+        "Start menu activation probe exceeded 30 seconds",
+        "responding=post-exit-cleanup",
+        "30 seconds after the uninstaller process exited",
         "Select-Object -First 19",
         "retention_bound = 20",
         "scanned_phase_logs",
@@ -176,6 +215,14 @@ def test_end_to_end_contract_covers_healthy_repair_drift_and_reuse() -> None:
         assert required in test_script
     assert "Set-Item -LiteralPath $pythonRegistry -Value" in test_script
     assert "(Get-Item -LiteralPath $pythonRegistry).SetValue" not in test_script
+    assert "[Console]::Out.WriteLine($progressMessage)" in test_script
+    assert "[Console]::Out.WriteLine($completionMessage)" in test_script
+    assert "Write-Output $progressMessage" not in test_script
+    assert "Write-Output $completionMessage" not in test_script
+    assert "Start-Process -FilePath $uninstaller" not in test_script
+    assert "Start-Process -FilePath $reuseUninstaller" not in test_script
+    assert "'/LOG=\"{0}\"' -f $setupLog" in test_script
+    assert "$process.Kill()" not in test_script
 
 
 def test_end_to_end_reuse_fixture_is_explicit_stable_and_captured_before_mutation() -> None:
@@ -208,12 +255,12 @@ def test_end_to_end_reuse_fixture_is_explicit_stable_and_captured_before_mutatio
 
     baseline = harness.index("$reusablePythonBaseline = Get-ReusablePythonSnapshot")
     forced_install = harness.index("-Phase 'forced_private_install'")
-    private_exit = harness.index("Test-E2ECondition ($privateUninstall.ExitCode -eq 0)")
+    private_exit = harness.index("Test-E2ECondition ($privateUninstallExitCode -eq 0)")
     private_checkpoint = harness.index(
         "$reusablePythonAfterPrivateUninstall = Test-ReusablePythonUnchanged"
     )
     pep_514_registration = harness.index("$pythonRegistryRoot = 'HKCU:\\Software\\Python'")
-    reuse_exit = harness.index("Test-E2ECondition ($reuseUninstall.ExitCode -eq 0)")
+    reuse_exit = harness.index("Test-E2ECondition ($reuseUninstallExitCode -eq 0)")
     reuse_checkpoint = harness.index(
         "$reusablePythonAfterReuseUninstall = Test-ReusablePythonUnchanged"
     )
@@ -222,15 +269,28 @@ def test_end_to_end_reuse_fixture_is_explicit_stable_and_captured_before_mutatio
     assert reuse_exit < reuse_checkpoint
 
 
-def test_end_to_end_reports_process_failure_before_log_discovery() -> None:
+def test_end_to_end_preserves_process_failure_when_log_discovery_fails() -> None:
     test_script = read("scripts/build/Test-Installer.ps1")
     exit_check = test_script.index("if ($AllowedExitCodes -notcontains $process.ExitCode)")
     log_discovery = test_script.index(
         "$script:evidence.log_paths[$Phase] = Get-NewInstallerLogPath"
     )
-    assert exit_check < log_discovery
+    assert log_discovery < exit_check
+    assert "$logDiscoveryError = $_.Exception.Message" in test_script
+    assert "Log discovery: $logDiscoveryError" in test_script
     assert "Get-SanitizedSetupLogTail" in test_script
     assert "<redacted-github-token>" in test_script
+
+
+def test_post_exit_cleanup_wait_is_scoped_to_uninstall() -> None:
+    harness = read("scripts/build/Test-Installer.ps1")
+    setup_start = harness.index("function Invoke-Setup")
+    uninstall_start = harness.index("function Invoke-MonitoredUninstall")
+    verification_start = harness.index("function Invoke-ManagedVerification")
+    setup_body = harness[setup_start:uninstall_start]
+    uninstall_body = harness[uninstall_start:verification_start]
+    assert "postExitCleanupTimedOut" not in setup_body
+    assert "postExitCleanupTimedOut" in uninstall_body
 
 
 def test_windows_server_e2e_override_is_explicit_and_github_hosted_only() -> None:

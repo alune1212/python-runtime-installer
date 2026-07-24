@@ -182,6 +182,35 @@ Describe 'Lifecycle primitives' {
         }
     }
 
+    It 'removes inherited pip configuration from managed child processes' {
+        $savedEnsurePipOptions = $env:ENSUREPIP_OPTIONS
+        $savedPipRequirement = $env:PIP_REQUIREMENT
+        try {
+            $env:ENSUREPIP_OPTIONS = 'altinstall'
+            $env:PIP_REQUIREMENT = 'C:\untrusted\requirements.txt'
+            $result = Invoke-LoggedProcess -FilePath $env:ComSpec -Arguments @(
+                '/d',
+                '/c',
+                'if defined ENSUREPIP_OPTIONS exit /b 31 & if defined PIP_REQUIREMENT exit /b 32 & exit /b 0'
+            ) -Stage 'environment-isolation'
+            $result.ExitCode | Should -Be 0
+        } finally {
+            $env:ENSUREPIP_OPTIONS = $savedEnsurePipOptions
+            $env:PIP_REQUIREMENT = $savedPipRequirement
+        }
+    }
+
+    It 'emits a real heartbeat without interrupting a long-running child process' {
+        {
+            $result = Invoke-LoggedProcess -FilePath $env:ComSpec -Arguments @(
+                '/d',
+                '/c',
+                'ping 127.0.0.1 -n 3 > nul'
+            ) -Stage 'heartbeat-test' -EmitHeartbeat -HeartbeatIntervalSeconds 1
+            $result.ExitCode | Should -Be 0
+        } | Should -Not -Throw
+    }
+
     It 'falls back to the system environment registry for native architecture' {
         $savedArchitecture = $env:PROCESSOR_ARCHITECTURE
         $savedWowArchitecture = $env:PROCESSOR_ARCHITEW6432

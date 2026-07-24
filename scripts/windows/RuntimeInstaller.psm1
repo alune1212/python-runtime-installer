@@ -151,7 +151,10 @@ function Invoke-LoggedProcess {
         [string[]]$Arguments = @(),
         [Parameter(Mandatory = $true)][string]$Stage,
         [string]$WorkingDirectory = '',
-        [int[]]$AllowedExitCodes = @(0)
+        [int[]]$AllowedExitCodes = @(0),
+        [switch]$EmitHeartbeat,
+        [ValidateRange(1, 60)][int]$HeartbeatIntervalSeconds = 5,
+        [ValidateRange(1, 120)][int]$OutputDrainTimeoutSeconds = 15
     )
 
     $argumentString = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument -Value $_ }) -join ' ')
@@ -163,6 +166,15 @@ function Invoke-LoggedProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $environmentNames = @($startInfo.EnvironmentVariables.Keys | ForEach-Object { [string]$_ })
+    foreach ($environmentName in $environmentNames) {
+        if (
+            [StringComparer]::OrdinalIgnoreCase.Equals($environmentName, 'ENSUREPIP_OPTIONS') -or
+            $environmentName.StartsWith('PIP_', [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            [void]$startInfo.EnvironmentVariables.Remove($environmentName)
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
         $startInfo.WorkingDirectory = $WorkingDirectory
     }
@@ -173,7 +185,46 @@ function Invoke-LoggedProcess {
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    $process.WaitForExit()
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextHeartbeat = $HeartbeatIntervalSeconds
+    $heartbeatOutputAvailable = $true
+    $outputDrainDeadline = $null
+    while ($true) {
+        if (-not $process.HasExited) {
+            [void]$process.WaitForExit(250)
+        } elseif ($null -eq $outputDrainDeadline) {
+            $process.WaitForExit()
+            $outputDrainDeadline = [DateTime]::UtcNow.AddSeconds($OutputDrainTimeoutSeconds)
+        }
+        if ($process.HasExited -and $stdoutTask.IsCompleted -and $stderrTask.IsCompleted) {
+            break
+        }
+        if ($outputDrainDeadline -and [DateTime]::UtcNow -ge $outputDrainDeadline) {
+            throw "Process output did not close within $OutputDrainTimeoutSeconds seconds: $FilePath"
+        }
+        if ($EmitHeartbeat -and $stopwatch.Elapsed.TotalSeconds -ge $nextHeartbeat) {
+            if ($heartbeatOutputAvailable) {
+                $heartbeat = "PYRUNTIME_HEARTBEAT|{0}|{1}" -f @(
+                    $Stage,
+                    [Math]::Floor($stopwatch.Elapsed.TotalSeconds)
+                )
+                try {
+                    [Console]::Out.WriteLine($heartbeat)
+                    [Console]::Out.Flush()
+                } catch {
+                    $heartbeatOutputAvailable = $false
+                    Write-InstallerLog -Stage $Stage -Level 'WARN' -Message (
+                        'Progress heartbeat output became unavailable; the managed process will continue.'
+                    )
+                }
+            }
+            $nextHeartbeat += $HeartbeatIntervalSeconds
+        }
+        if ($process.HasExited) {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    $stopwatch.Stop()
     $stdout = $stdoutTask.Result
     $stderr = $stderrTask.Result
     if (-not [string]::IsNullOrWhiteSpace($stdout)) {
@@ -486,7 +537,7 @@ function Install-PrivatePython {
             'Include_tools=1',
             'Include_tcltk=1'
         )
-        Invoke-LoggedProcess -FilePath $savedInstaller -Arguments $arguments -Stage 'python-install' -AllowedExitCodes @(0, 3010) | Out-Null
+        Invoke-LoggedProcess -FilePath $savedInstaller -Arguments $arguments -Stage 'python-install' -AllowedExitCodes @(0, 3010) -EmitHeartbeat | Out-Null
         if (-not (Test-CompatiblePython -PythonPath $pythonPath -ExpectedVersion $ExpectedVersion)) {
             throw "Private CPython failed post-install health check: $pythonPath"
         }
@@ -513,7 +564,7 @@ function Uninstall-PrivatePython {
     $savedInstaller = Join-Path (Join-Path $AppRoot 'maintenance') $InstallerFilename
     if (Test-Path -LiteralPath $savedInstaller -PathType Leaf) {
         try {
-            Invoke-LoggedProcess -FilePath $savedInstaller -Arguments @('/uninstall', '/quiet') -Stage 'python-uninstall' -AllowedExitCodes @(0, 1605, 3010) | Out-Null
+            Invoke-LoggedProcess -FilePath $savedInstaller -Arguments @('/uninstall', '/quiet') -Stage 'python-uninstall' -AllowedExitCodes @(0, 1605, 3010) -EmitHeartbeat | Out-Null
         } catch {
             Write-InstallerLog -Stage 'python-uninstall' -Level 'WARN' -Message (
                 Format-InstallerErrorRecord -ErrorRecord $_

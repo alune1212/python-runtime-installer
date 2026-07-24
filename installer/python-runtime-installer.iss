@@ -65,6 +65,22 @@ english.HealthySuccess=The existing managed Python environment is healthy; no re
 english.RepairSuccess=Environment drift was found and repaired successfully.
 english.UpgradeSuccess=The managed Python environment was upgraded and verified successfully.
 english.DowngradeBlocked=A newer version is already installed. Uninstall it before installing this older version.
+english.ProgressPreflight=Checking system compatibility...
+english.ProgressIntegrity=Verifying offline payload integrity...
+english.ProgressRepairCheck=Checking the existing managed environment...
+english.ProgressPythonDiscovery=Selecting a compatible Python runtime...
+english.ProgressPythonInstall=Installing private CPython 3.13.14...
+english.ProgressVenv=Creating the isolated Python environment...
+english.ProgressBootstrap=Preparing locked installer tooling...
+english.ProgressDependencies=Installing locked offline dependencies...
+english.ProgressVerification=Verifying the staged environment...
+english.ProgressActivation=Activating the verified environment...
+english.ProgressEntrypoints=Rebuilding command launchers...
+english.ProgressFinal=Running final environment verification...
+english.ProgressCleanup=Cleaning up replaced installation files...
+english.ProgressFailed=Installation failed; retained diagnostics are available.
+english.ProgressComplete=Finishing installation...
+english.ProgressElapsed=%1 Elapsed: %2 seconds.
 chinesesimplified.InstallingRuntime=正在安装并验证受管 Python 环境……
 chinesesimplified.RuntimeInstallFailed=受管 Python 环境安装失败。请查看 %1 中的日志。
 chinesesimplified.InstallFailedHeading=安装失败
@@ -75,6 +91,22 @@ chinesesimplified.HealthySuccess=现有受管 Python 环境健康，无需重建
 chinesesimplified.RepairSuccess=已发现环境漂移并成功完成修复。
 chinesesimplified.UpgradeSuccess=受管 Python 环境已成功升级并通过验证。
 chinesesimplified.DowngradeBlocked=已安装更高版本。如需安装此旧版本，请先卸载当前版本。
+chinesesimplified.ProgressPreflight=正在检查系统兼容性……
+chinesesimplified.ProgressIntegrity=正在验证离线负载完整性……
+chinesesimplified.ProgressRepairCheck=正在检查现有受管环境……
+chinesesimplified.ProgressPythonDiscovery=正在选择兼容的 Python 运行时……
+chinesesimplified.ProgressPythonInstall=正在安装私有 CPython 3.13.14……
+chinesesimplified.ProgressVenv=正在创建隔离的 Python 环境……
+chinesesimplified.ProgressBootstrap=正在准备锁定的安装工具……
+chinesesimplified.ProgressDependencies=正在安装锁定的离线依赖……
+chinesesimplified.ProgressVerification=正在验证 staging 环境……
+chinesesimplified.ProgressActivation=正在激活已验证的环境……
+chinesesimplified.ProgressEntrypoints=正在重建命令启动器……
+chinesesimplified.ProgressFinal=正在执行最终环境验证……
+chinesesimplified.ProgressCleanup=正在清理已替换的安装文件……
+chinesesimplified.ProgressFailed=安装失败，诊断日志已保留。
+chinesesimplified.ProgressComplete=正在完成安装……
+chinesesimplified.ProgressElapsed=%1 已用 %2 秒。
 
 [Files]
 Source: "..\build\payload\*"; DestDir: "{tmp}\PythonRuntimePayload"; Flags: ignoreversion recursesubdirs createallsubdirs deleteafterinstall
@@ -90,7 +122,7 @@ Name: "{group}\Open Installation Logs"; Filename: "{win}\explorer.exe"; Paramete
 Name: "{group}\Uninstall Python Runtime Installer"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:GetManagedRuntimeParameters}"; Flags: runhidden waituntilterminated; BeforeInstall: BeginManagedRuntimeInstall; AfterInstall: CompleteManagedRuntimeInstall
+Filename: "{cmd}"; Parameters: "/d /c exit /b 0"; Flags: runhidden waituntilterminated; BeforeInstall: RunManagedRuntimeInstall; AfterInstall: CompleteManagedRuntimeInstall
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\maintenance\Uninstall-Runtime.ps1"" -AppRoot ""{app}"" -ConfigPath ""{app}\maintenance\config\product.json"""; Flags: runhidden waituntilterminated; RunOnceId: "ManagedRuntimeUninstall"
@@ -99,6 +131,8 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -N
 const
   PROCESSOR_ARCHITECTURE_AMD64 = 9;
   MinimumFreeBytes = 2147483648;
+  ManagedProgressPrefix = 'PYRUNTIME_PROGRESS|';
+  ManagedHeartbeatPrefix = 'PYRUNTIME_HEARTBEAT|';
 
 type
   TSystemInfo = record
@@ -121,6 +155,7 @@ var
   ExistingManagedManifest: Boolean;
   ManagedInstallStarted: Boolean;
   ManagedStatusPath: String;
+  ManagedProgressBase: Integer;
 
 procedure GetNativeSystemInfo(var SystemInfo: TSystemInfo);
   external 'GetNativeSystemInfo@kernel32.dll stdcall';
@@ -289,11 +324,166 @@ begin
   Result := Parameters;
 end;
 
-procedure BeginManagedRuntimeInstall;
+function GetManagedProgressMessage(const Stage: String): String;
+begin
+  if Stage = 'preflight' then
+    Result := CustomMessage('ProgressPreflight')
+  else if Stage = 'integrity' then
+    Result := CustomMessage('ProgressIntegrity')
+  else if Stage = 'repair-check' then
+    Result := CustomMessage('ProgressRepairCheck')
+  else if Stage = 'python-discovery' then
+    Result := CustomMessage('ProgressPythonDiscovery')
+  else if Stage = 'python-install' then
+    Result := CustomMessage('ProgressPythonInstall')
+  else if Stage = 'venv-create' then
+    Result := CustomMessage('ProgressVenv')
+  else if Stage = 'bootstrap-install' then
+    Result := CustomMessage('ProgressBootstrap')
+  else if Stage = 'dependency-install' then
+    Result := CustomMessage('ProgressDependencies')
+  else if Stage = 'verification' then
+    Result := CustomMessage('ProgressVerification')
+  else if Stage = 'activation' then
+    Result := CustomMessage('ProgressActivation')
+  else if Stage = 'entrypoint-relink' then
+    Result := CustomMessage('ProgressEntrypoints')
+  else if Stage = 'verification-final' then
+    Result := CustomMessage('ProgressFinal')
+  else if (Stage = 'cleanup') or (Stage = 'python-uninstall') then
+    Result := CustomMessage('ProgressCleanup')
+  else if Stage = 'failed' then
+    Result := CustomMessage('ProgressFailed')
+  else if Stage = 'complete' then
+    Result := CustomMessage('ProgressComplete')
+  else
+    Result := CustomMessage('InstallingRuntime');
+end;
+
+function GetManagedProgressPosition(const Stage: String): Integer;
+begin
+  if Stage = 'preflight' then
+    Result := 5
+  else if Stage = 'integrity' then
+    Result := 10
+  else if Stage = 'repair-check' then
+    Result := 12
+  else if Stage = 'python-discovery' then
+    Result := 15
+  else if Stage = 'python-install' then
+    Result := 20
+  else if Stage = 'venv-create' then
+    Result := 30
+  else if Stage = 'bootstrap-install' then
+    Result := 35
+  else if Stage = 'dependency-install' then
+    Result := 40
+  else if Stage = 'verification' then
+    Result := 65
+  else if Stage = 'activation' then
+    Result := 75
+  else if Stage = 'entrypoint-relink' then
+    Result := 82
+  else if Stage = 'verification-final' then
+    Result := 92
+  else if (Stage = 'cleanup') or (Stage = 'python-uninstall') then
+    Result := 96
+  else if Stage = 'failed' then
+    Result := 99
+  else if Stage = 'complete' then
+    Result := 100
+  else
+    Result := 1;
+end;
+
+procedure SetManagedProgress(const Stage: String);
+begin
+  ManagedProgressBase := GetManagedProgressPosition(Stage);
+  WizardForm.StatusLabel.Caption := GetManagedProgressMessage(Stage);
+  WizardForm.ProgressGauge.Style := npbstNormal;
+  WizardForm.ProgressGauge.Min := 0;
+  WizardForm.ProgressGauge.Max := 100;
+  WizardForm.ProgressGauge.Position := ManagedProgressBase;
+  WizardForm.StatusLabel.Update;
+  WizardForm.ProgressGauge.Update;
+end;
+
+procedure HandleManagedRuntimeOutput(
+  const S: String;
+  const Error, FirstLine: Boolean
+);
+var
+  Payload: String;
+  Stage: String;
+  ElapsedText: String;
+  Separator: Integer;
+  ElapsedSeconds: Integer;
+  Position: Integer;
+begin
+  if Error then
+  begin
+    Log('Managed runtime output error: ' + S);
+    Exit;
+  end;
+  if Pos(ManagedProgressPrefix, S) = 1 then
+  begin
+    Stage := Copy(S, Length(ManagedProgressPrefix) + 1, Length(S));
+    SetManagedProgress(Stage);
+    Log('Managed runtime progress: ' + Stage);
+    Exit;
+  end;
+  if Pos(ManagedHeartbeatPrefix, S) = 1 then
+  begin
+    Payload := Copy(S, Length(ManagedHeartbeatPrefix) + 1, Length(S));
+    Separator := Pos('|', Payload);
+    if Separator = 0 then
+      Exit;
+    Stage := Copy(Payload, 1, Separator - 1);
+    ElapsedText := Copy(Payload, Separator + 1, Length(Payload));
+    ElapsedSeconds := StrToIntDef(ElapsedText, 0);
+    ManagedProgressBase := GetManagedProgressPosition(Stage);
+    WizardForm.StatusLabel.Caption := FmtMessage(CustomMessage('ProgressElapsed'), [GetManagedProgressMessage(Stage), ElapsedText]);
+    Position := ManagedProgressBase + (ElapsedSeconds div 5);
+    if Position > ManagedProgressBase + 3 then
+      Position := ManagedProgressBase + 3;
+    if Position > 98 then
+      Position := 98;
+    WizardForm.ProgressGauge.Position := Position;
+    WizardForm.StatusLabel.Update;
+    WizardForm.ProgressGauge.Update;
+    Exit;
+  end;
+  if S <> '' then
+    Log('Managed runtime output: ' + S);
+end;
+
+procedure RunManagedRuntimeInstall;
+var
+  ResultCode: Integer;
 begin
   ManagedInstallStarted := True;
-  WizardForm.StatusLabel.Caption := CustomMessage('InstallingRuntime');
+  SetManagedProgress('preflight');
   DeleteFile(ManagedStatusPath);
+  try
+    if not ExecAndLogOutput(
+      ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      GetManagedRuntimeParameters(''),
+      '',
+      SW_SHOWNORMAL,
+      ewWaitUntilTerminated,
+      ResultCode,
+      @HandleManagedRuntimeOutput
+    ) then
+    begin
+      Log('Could not start the managed runtime process.');
+      SaveStringToFile(ManagedStatusPath, 'failed', False);
+    end
+    else
+      Log(Format('Managed runtime process exit code: %d', [ResultCode]));
+  except
+    Log('Managed runtime process exception: ' + GetExceptionMessage);
+    SaveStringToFile(ManagedStatusPath, 'failed', False);
+  end;
 end;
 
 procedure ReportManagedRuntimeFailure(ErrorMessage: String; ExitCode: Integer);
