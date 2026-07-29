@@ -54,6 +54,13 @@ def test_target_hashing_does_not_depend_on_powershell_module_autoload() -> None:
     assert "[System.IO.File]::OpenRead($Path)" in module
 
 
+def test_discovery_registry_names_array_is_powershell_51_compatible() -> None:
+    module = read("scripts/windows/RuntimeInstaller.psm1")
+    match = re.search(r"\$script:DiscoveryRegistryValueNames = @\((.*?)\n\)", module, re.S)
+    assert match is not None
+    assert not re.search(r",\s*$", match.group(1))
+
+
 def test_inno_contract_is_per_user_bilingual_silent_and_start_menu_only() -> None:
     project = read("installer/python-runtime-installer.iss")
     for required in (

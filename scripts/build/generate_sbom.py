@@ -15,9 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = uuid.UUID("4fb8d7be-3930-48bb-a40d-7d21d02dcf51")
 
 
-def _library_component(
-    item: "LockedRequirement", scope: str | None = None
-) -> dict[str, object]:
+def _library_component(item: LockedRequirement, scope: str | None = None) -> dict[str, object]:
     purl = f"pkg:pypi/{item.canonical_name}@{item.version}"
     component: dict[str, object] = {
         "type": "library",
@@ -39,8 +37,7 @@ def make_sbom(lock_path: Path, bootstrap_lock_path: Path | None = None) -> dict[
     translation = inno["chinese_translation"]
     inno_purl = f"pkg:github/jrsoftware/issrc@{inno['version']}"
     translation_purl = (
-        "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@"
-        + translation["commit"]
+        "pkg:github/kira-96/Inno-Setup-Chinese-Simplified-Translation@" + translation["commit"]
     )
     root_component: dict[str, object] = {
         "type": "application",

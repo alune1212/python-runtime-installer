@@ -8,7 +8,7 @@ $script:DiscoveryRegistryValueNames = @(
     'PythonExecutable',
     'PythonVersion',
     'InstallerVersion',
-    'ManifestPath',
+    'ManifestPath'
 )
 
 function Initialize-InstallerLog {
