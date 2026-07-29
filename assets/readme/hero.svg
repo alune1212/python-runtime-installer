@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="440" viewBox="0 0 1200 440"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Python Runtime Installer</title>
+  <desc id="desc">A verified delivery blueprint for an offline Windows CPython environment, from payload integrity through staging, verification, and activation.</desc>
+
+  <rect width="1200" height="440" rx="24" fill="#0B1117"/>
+  <path d="M56 64H1144" stroke="#8A98A8" stroke-opacity=".22"/>
+
+  <g id="title-block">
+    <text x="56" y="45"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18" letter-spacing="1.8">
+      OFFLINE WINDOWS RUNTIME / v0.1.0 / CPython 3.13.14 / x64
+    </text>
+    <text x="56" y="140"
+          fill="#F4F7F9"
+          font-family="Segoe UI Semibold, PingFang SC, sans-serif"
+          font-size="68" font-weight="650">
+      Python Runtime
+    </text>
+    <text x="56" y="209"
+          fill="#F4F7F9"
+          font-family="Segoe UI Semibold, PingFang SC, sans-serif"
+          font-size="68" font-weight="650">
+      Installer
+    </text>
+    <text x="58" y="255"
+          fill="#8A98A8"
+          font-family="Segoe UI, PingFang SC, sans-serif"
+          font-size="26">
+      一个 EXE，离线安装受管 CPython；验证通过后才切换生效。
+    </text>
+  </g>
+
+  <g id="sealed-payload">
+    <path d="M805 88H1052L1118 154V266H805Z"
+          fill="none" stroke="#5A9FFF" stroke-width="2"/>
+    <path d="M1052 88V154H1118"
+          fill="none" stroke="#5A9FFF" stroke-width="2"/>
+    <text x="835" y="124"
+          fill="#5A9FFF"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="20" letter-spacing="1.4">
+      SEALED PAYLOAD
+    </text>
+    <path d="M835 148H1087" stroke="#8A98A8" stroke-opacity=".32"/>
+    <circle cx="846" cy="176" r="5" fill="#45C58A"/>
+    <text x="864" y="183"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="20">
+      CPython 3.13.14
+    </text>
+    <circle cx="846" cy="210" r="5" fill="#45C58A"/>
+    <text x="864" y="217"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="20">
+      hash-locked wheelhouse
+    </text>
+    <circle cx="846" cy="244" r="5" fill="#45C58A"/>
+    <text x="864" y="251"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="20">
+      offline verifier
+    </text>
+  </g>
+
+  <g id="transaction-flow">
+    <text x="56" y="310"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18" letter-spacing="1.2">
+      PYRUNTIME_PROGRESS|
+    </text>
+    <path d="M76 352H1115" stroke="#5A9FFF" stroke-width="2"/>
+    <path d="M612 343V322H353V343"
+          fill="none" stroke="#8A98A8" stroke-width="2" stroke-dasharray="6 7"/>
+    <path d="M353 343L346 333M353 343L360 333"
+          fill="none" stroke="#8A98A8" stroke-width="2"/>
+    <text x="424" y="316"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18">
+      failure: keep old environment
+    </text>
+
+    <circle cx="76" cy="352" r="10" fill="#0B1117" stroke="#5A9FFF" stroke-width="3"/>
+    <text x="99" y="361"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="28">
+      INTEGRITY
+    </text>
+    <text x="99" y="394"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18">
+      SHA-256
+    </text>
+
+    <circle cx="340" cy="352" r="10" fill="#0B1117" stroke="#5A9FFF" stroke-width="3"/>
+    <text x="363" y="361"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="28">
+      .STAGING
+    </text>
+    <text x="363" y="394"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18">
+      isolated venv
+    </text>
+
+    <circle cx="610" cy="352" r="10" fill="#0B1117" stroke="#45C58A" stroke-width="3"/>
+    <text x="633" y="361"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="28">
+      VERIFY
+    </text>
+    <text x="633" y="394"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18">
+      offline checks
+    </text>
+
+    <circle cx="872" cy="352" r="10" fill="#45C58A"/>
+    <text x="895" y="361"
+          fill="#F4F7F9"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="28">
+      ACTIVATE
+    </text>
+    <text x="895" y="394"
+          fill="#8A98A8"
+          font-family="Cascadia Mono, SFMono-Regular, Consolas, monospace"
+          font-size="18">
+      verified handoff
+    </text>
+  </g>
+</svg>
